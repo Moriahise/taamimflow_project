@@ -10,201 +10,304 @@ view modes are supported:
 * ``stam`` – display only the consonantal text (sometimes called
   ``STAM``) by stripping vowels and trope marks.
 * ``tikkun`` – present the modern and STAM text side‑by‑side in a
-  simple two column table.  For short passages this provides a
-  convenient reference for learners.
+  simple two column table.
 
 Colour highlighting can also be toggled.  In ``trope_colors`` mode the
 background of each word is filled based on the trope group.  In
 ``symbol_colors`` mode a symbol is inserted before each word and
 coloured based on the symbol.  In ``no_colors`` mode the text is
-rendered in plain black.
+rendered in plain black on white.
 
-The widget expects the content to be provided via :meth:`set_text` as
-an iterable of triples ``(word, trope_group, symbol)``.  A naive
-tokenisation strategy is provided by the main window but can be
-replaced with a proper parser at a later stage.
+The widget emits a ``word_clicked`` signal when the user clicks on a
+word, carrying the word text, its trope group name and the list of
+trope marks.  The main window can connect to this signal to update the
+musical notation and translation panels.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple
+import unicodedata
+from typing import Iterable, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont, QBrush, QTextCharFormat
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QBrush,
+    QTextCharFormat,
+    QTextCursor,
+    QMouseEvent,
+    QPalette,
+)
 from PyQt6.QtWidgets import QTextEdit
 
-# Default colour assignments for trope groups and symbols.  These
-# values mirror those used in the example application and can be
-# customised or externalised via configuration in future versions.
-DEFAULT_TROPE_COLORS = {
-    "Sof Pasuk": "#00FFFF",      # Cyan
-    "Zakef Katon": "#FFFF00",    # Yellow
-    "Etnachta": "#FF00FF",       # Magenta
-    "Tevir": "#FFFFFF",          # White
-    "End of Aliyah": "#0000FF",  # Blue
-    "End of Book": "#808080",    # Gray
-}
+from ..utils.trope_parser import (
+    Token,
+    GROUPS,
+    get_all_group_colors,
+    get_trope_group,
+)
 
-# Colours associated with the simple symbols used when
-# ``color_mode == "symbol_colors"``.  If a symbol is not found in
-# this mapping a default of white is used.
+
+# ── Colour tables ───────────────────────────────────────────────────
+
+# Build the default trope colour map from the parser module so that
+# both the parser and the widget stay in sync.
+DEFAULT_TROPE_COLORS = get_all_group_colors()
+
+# Symbol colours for symbol-colour mode.
 SYMBOL_COLORS = {
-    "✱": "#00FFFF",  # Cyan
-    "◆": "#FF00FF",  # Magenta
-    "▲": "#FFFF00",  # Yellow
+    "✱": "#00FFFF",
+    "◆": "#FF00FF",
+    "▲": "#FFFF00",
 }
 
 
 class ModernTorahTextWidget(QTextEdit):
-    """Widget for displaying Hebrew cantillation with multiple modes."""
+    """Widget for displaying Hebrew cantillation with multiple modes.
+
+    Signals
+    -------
+    word_clicked(str, str, list)
+        Emitted when the user clicks on a word.  Arguments are:
+        ``word`` (the raw Hebrew word), ``group_name`` (trope group)
+        and ``trope_marks`` (list of mark names on that word).
+    """
+
+    word_clicked = pyqtSignal(str, str, list)
 
     def __init__(self, parent: object | None = None) -> None:
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setFont(QFont("Times New Roman", 20))
-        # Clone default colour tables so they can be modified per
-        # instance without affecting the module constants.
+        self.setFont(QFont("Times New Roman", 22))
+        # Dark background like original TropeTrainer
+        self.setStyleSheet(
+            "QTextEdit { background-color: #1a1a2e; color: white; "
+            "border: 2px solid #8B008B; padding: 8px; }"
+        )
         self.trope_colors = DEFAULT_TROPE_COLORS.copy()
         self.symbol_colors = SYMBOL_COLORS.copy()
-        # Modes: 'modern', 'stam', 'tikkun'
+        # Modes
         self.view_mode: str = "modern"
-        # Modes: 'no_colors', 'trope_colors', 'symbol_colors'
         self.color_mode: str = "trope_colors"
-        # Internal representation of the text.  Each element is a triple
-        # (word, trope_group, symbol).
+        # Content as Token objects from trope_parser
+        self.tokens: List[Token] = []
+        # Legacy content as tuples (kept for backward compat)
         self.content: List[Tuple[str, str, str]] = []
+        # Track which character positions map to which token index
+        self._char_to_token: List[int] = []
+        # Currently selected token index
+        self._selected_index: int = -1
+
+    # ── Public API ──────────────────────────────────────────────────
+
+    def set_tokens(self, tokens: List[Token]) -> None:
+        """Set the widget content from parsed Token objects.
+
+        This is the preferred method.  It preserves full trope
+        information for click handling.
+        """
+        self.tokens = list(tokens)
+        # Also populate legacy tuple list for backward compat
+        self.content = [
+            (t.word, t.group_name, t.symbol) for t in self.tokens
+        ]
+        self._selected_index = -1
+        self.update_display()
 
     def set_text(self, tokens: Iterable[Tuple[str, str, str]]) -> None:
-        """Set the widget's content and refresh the display.
-
-        The provided ``tokens`` iterable should produce tuples of the
-        form ``(word, trope_group, symbol)``.  The widget does not
-        attempt to interpret these values; it simply uses them for
-        colour mapping and symbol insertion.
-        """
+        """Legacy API: set content from (word, group, symbol) tuples."""
         self.content = list(tokens)
+        # Create minimal Token objects
+        self.tokens = []
+        for word, group, symbol in self.content:
+            self.tokens.append(Token(
+                word=word,
+                group_name=group,
+                symbol=symbol,
+                color=self.trope_colors.get(group, "#D3D3D3"),
+                trope_marks=[group],
+                verse_end=False,
+            ))
+        self._selected_index = -1
         self.update_display()
 
     def set_view_mode(self, mode: str) -> None:
-        """Set the view mode and refresh the display.
-
-        ``mode`` must be one of ``"modern"``, ``"stam"`` or ``"tikkun"``.
-        Unknown values are ignored.
-        """
         if mode in {"modern", "stam", "tikkun"}:
             self.view_mode = mode
             self.update_display()
 
     def set_color_mode(self, mode: str) -> None:
-        """Set the colour mode and refresh the display.
-
-        ``mode`` must be one of ``"no_colors"``, ``"trope_colors"`` or
-        ``"symbol_colors"``.  Unknown values are ignored.
-        """
         if mode in {"no_colors", "trope_colors", "symbol_colors"}:
             self.color_mode = mode
             self.update_display()
 
+    def setPlaceholderText(self, text: str) -> None:
+        """Override to set placeholder with appropriate styling."""
+        super().setPlaceholderText(text)
+
+    # ── Mouse handling ──────────────────────────────────────────────
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Detect which word was clicked and emit word_clicked signal."""
+        if event.button() == Qt.MouseButton.LeftButton and self.tokens:
+            cursor = self.cursorForPosition(event.pos().toPoint() if isinstance(event.pos(), QPointF) else event.pos())
+            pos = cursor.position()
+            if 0 <= pos < len(self._char_to_token):
+                token_idx = self._char_to_token[pos]
+                if 0 <= token_idx < len(self.tokens):
+                    token = self.tokens[token_idx]
+                    self._selected_index = token_idx
+                    # Re-render to highlight selected word
+                    self.update_display()
+                    # Emit signal
+                    self.word_clicked.emit(
+                        token.word,
+                        token.group_name,
+                        token.trope_marks,
+                    )
+        super().mousePressEvent(event)
+
+    # ── Display methods ─────────────────────────────────────────────
+
     def update_display(self) -> None:
-        """Redraw the content according to the current modes."""
-        if not self.content:
-            # Nothing to display yet: clear and return.
+        if not self.tokens:
             self.clear()
             return
         if self.view_mode == "modern":
-            self.display_modern_view()
+            self._display_modern()
         elif self.view_mode == "stam":
-            self.display_stam_view()
+            self._display_stam()
         elif self.view_mode == "tikkun":
-            self.display_tikkun_view()
+            self._display_tikkun()
         else:
-            # Unknown mode: fallback to modern
-            self.display_modern_view()
+            self._display_modern()
 
-    def display_modern_view(self) -> None:
-        """Modern mode displays vowels and tropes."""
+    def _display_modern(self) -> None:
+        """Render modern view with trope-coloured backgrounds."""
         self.clear()
+        self._char_to_token = []
         cursor = self.textCursor()
-        for word, trope_group, symbol in self.content:
+        # Set right-to-left alignment for Hebrew
+        block_fmt = cursor.blockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignRight)
+        cursor.setBlockFormat(block_fmt)
+
+        for idx, token in enumerate(self.tokens):
             fmt = QTextCharFormat()
-            fmt.setFont(QFont("Times New Roman", 20))
+            fmt.setFont(QFont("Times New Roman", 22))
+
+            is_selected = (idx == self._selected_index)
+
             if self.color_mode == "trope_colors":
-                # Colour by trope group
-                color = self.trope_colors.get(trope_group, "#FFFFFF")
-                fmt.setBackground(QBrush(QColor(color)))
+                bg_color = token.color
+                fmt.setBackground(QBrush(QColor(bg_color)))
                 fmt.setForeground(QBrush(QColor("#000000")))
-                cursor.insertText(word + " ", fmt)
+                if is_selected:
+                    # Highlight selected word with a border effect
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                    fmt.setFontUnderline(True)
+                    fmt.setUnderlineColor(QColor("#FF0000"))
+
             elif self.color_mode == "symbol_colors":
-                # Insert symbol before the word and colour by symbol
-                s_color = self.symbol_colors.get(symbol, "#FFFFFF")
+                s_color = self.symbol_colors.get(token.symbol, "#FFFFFF")
                 fmt.setBackground(QBrush(QColor(s_color)))
                 fmt.setForeground(QBrush(QColor("#000000")))
-                cursor.insertText(f"{symbol} ", fmt)
-                cursor.insertText(word + " ", fmt)
-            else:
-                # no colours: plain black
-                fmt.setForeground(QBrush(QColor("#000000")))
-                cursor.insertText(word + " ", fmt)
+                if is_selected:
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                    fmt.setFontUnderline(True)
 
-    def display_stam_view(self) -> None:
-        """STAM view strips vowels and tropes, optionally colourised."""
+                # Insert symbol
+                sym_text = f"{token.symbol} "
+                start = len(self._char_to_token)
+                cursor.insertText(sym_text, fmt)
+                self._char_to_token.extend([idx] * len(sym_text))
+
+            else:
+                # no colours
+                fmt.setForeground(QBrush(QColor("#FFFFFF")))
+                if is_selected:
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                    fmt.setFontUnderline(True)
+
+            word_text = token.word + " "
+            cursor.insertText(word_text, fmt)
+            self._char_to_token.extend([idx] * len(word_text))
+
+            # Add verse-end line break
+            if token.verse_end:
+                cursor.insertText("\n")
+                self._char_to_token.append(idx)
+
+    def _display_stam(self) -> None:
+        """STAM view: consonants only, optionally coloured."""
         self.clear()
+        self._char_to_token = []
         cursor = self.textCursor()
-        for word, trope_group, symbol in self.content:
-            # Remove diacritics and cantillation marks by filtering
-            # combining characters.  A more sophisticated
-            # implementation would rely on ``taamimflow.utils.hebrew``.
-            stripped = ''.join(ch for ch in word if not _is_combining(ch))
+        block_fmt = cursor.blockFormat()
+        block_fmt.setAlignment(Qt.AlignmentFlag.AlignRight)
+        cursor.setBlockFormat(block_fmt)
+
+        for idx, token in enumerate(self.tokens):
+            stripped = _strip_diacritics(token.word)
             fmt = QTextCharFormat()
-            fmt.setFont(QFont("Times New Roman", 20))
+            fmt.setFont(QFont("Times New Roman", 22))
+
+            is_selected = (idx == self._selected_index)
+
             if self.color_mode == "trope_colors":
-                color = self.trope_colors.get(trope_group, "#FFFFFF")
-                fmt.setBackground(QBrush(QColor(color)))
+                fmt.setBackground(QBrush(QColor(token.color)))
                 fmt.setForeground(QBrush(QColor("#000000")))
             elif self.color_mode == "symbol_colors":
-                # In STAM mode symbol colours fall back to trope colours
-                color = self.trope_colors.get(trope_group, "#FFFFFF")
-                fmt.setBackground(QBrush(QColor(color)))
+                fmt.setBackground(QBrush(QColor(token.color)))
                 fmt.setForeground(QBrush(QColor("#000000")))
             else:
-                fmt.setForeground(QBrush(QColor("#000000")))
-            cursor.insertText(stripped + " ", fmt)
+                fmt.setForeground(QBrush(QColor("#FFFFFF")))
 
-    def display_tikkun_view(self) -> None:
-        """Tikkun view displays two columns (modern and STAM)."""
-        # Construct the modern and STAM text by joining words.
-        modern_words: List[str] = []
-        stam_words: List[str] = []
-        for word, _trope_group, _symbol in self.content:
-            modern_words.append(word)
-            stam_words.append(''.join(ch for ch in word if not _is_combining(ch)))
-        modern_text = ' '.join(modern_words)
-        stam_text = ' '.join(stam_words)
-        # Build a minimal HTML table.  Colour modes are ignored here
-        # because HTML styling complicates combining the two modes.  A
-        # future version could integrate colour into the HTML.
+            if is_selected:
+                fmt.setFontWeight(QFont.Weight.Bold)
+                fmt.setFontUnderline(True)
+
+            word_text = stripped + " "
+            cursor.insertText(word_text, fmt)
+            self._char_to_token.extend([idx] * len(word_text))
+
+            if token.verse_end:
+                cursor.insertText("\n")
+                self._char_to_token.append(idx)
+
+    def _display_tikkun(self) -> None:
+        """Tikkun view: two-column table (modern and STAM)."""
+        modern_parts: List[str] = []
+        stam_parts: List[str] = []
+        for token in self.tokens:
+            modern_parts.append(token.word)
+            stam_parts.append(_strip_diacritics(token.word))
+
+        modern_text = " ".join(modern_parts)
+        stam_text = " ".join(stam_parts)
+
         html = f"""
-            <table width='100%' border='1' style='border-collapse: collapse;'>
-                <tr>
-                    <td width='50%' style='padding: 10px; text-align: right; font-size: 18pt;'>
-                        <b>Modern:</b><br>{modern_text}
-                    </td>
-                    <td width='50%' style='padding: 10px; text-align: right; font-size: 18pt;'>
-                        <b>STAM:</b><br>{stam_text}
-                    </td>
-                </tr>
-            </table>
+        <table width='100%' border='1' style='border-collapse: collapse;
+               background-color: #1a1a2e;'>
+            <tr>
+                <td width='50%' style='padding: 12px; text-align: right;
+                    font-size: 20pt; font-family: Times New Roman;
+                    color: white; direction: rtl;'>
+                    <b>Modern:</b><br/>{modern_text}
+                </td>
+                <td width='50%' style='padding: 12px; text-align: right;
+                    font-size: 20pt; font-family: Times New Roman;
+                    color: white; direction: rtl;'>
+                    <b>STAM:</b><br/>{stam_text}
+                </td>
+            </tr>
+        </table>
         """
         self.setHtml(html)
+        self._char_to_token = []
 
 
-def _is_combining(ch: str) -> bool:
-    """Return True if the character is a Hebrew diacritic or trope mark.
-
-    This function checks whether the Unicode combining class of
-    ``ch`` is non‑zero.  Characters with a combining class of zero
-    represent base characters; all others are treated as diacritics or
-    trope marks and are removed when stripping the text in STAM mode.
-    """
-    import unicodedata
-    return unicodedata.combining(ch) != 0
+def _strip_diacritics(word: str) -> str:
+    """Remove all combining characters (vowels and tropes) from a word."""
+    return "".join(ch for ch in word if unicodedata.combining(ch) == 0)

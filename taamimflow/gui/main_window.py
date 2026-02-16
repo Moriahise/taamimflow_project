@@ -6,18 +6,11 @@ the connector used to fetch text from an external source.  The
 interface has been expanded to resemble the complete TropeTrainer UI
 with a menu bar, a richly featured toolbar and a split central area
 containing both the text display and a panel of controls.
-
-The design deliberately avoids embedding business logic directly in
-the GUI.  Reading selection is delegated to :class:`OpenReadingDialog`
-and text retrieval is performed by the connector returned from
-``get_default_connector``.  A naive tokenisation method is provided
-to convert plain text into a sequence of triples ``(word, trope_group,
-symbol)`` suitable for display by :class:`ModernTorahTextWidget`.
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -36,7 +29,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
 )
-from PyQt6.QtGui import QAction, QFont, QColor, QPalette
+from PyQt6.QtGui import QAction, QFont, QColor, QPalette, QPixmap, QPainter
 from PyQt6.QtCore import Qt, QSize
 
 from ..config import get_app_config
@@ -44,6 +37,47 @@ from ..connectors import get_default_connector
 from ..connectors.base import BaseConnector
 from .text_widget import ModernTorahTextWidget
 from .open_reading_dialog import OpenReadingDialog
+from ..utils.trope_parser import tokenise, Token, GROUPS, get_trope_group
+
+
+# ── Musical notation symbols for each trope ─────────────────────────
+# A simplified mapping from trope group names to Unicode musical
+# notation representations.  In a full implementation this would
+# reference the tropedef.xml note sequences.  For display purposes
+# we show the trope name and a stylised note pattern.
+
+TROPE_NOTATION: Dict[str, str] = {
+    "Sof Pasuk":       "𝅘𝅥𝅮 𝅘𝅥𝅮 𝅗𝅥  (Sof Pasuq – final cadence)",
+    "Etnachta":        "𝅘𝅥𝅮 𝅘𝅥 𝅗𝅥  (Etnachta – half cadence)",
+    "Segol":           "𝅘𝅥𝅮 𝅘𝅥𝅮 𝅘𝅥𝅮 𝅗𝅥  (Segolta)",
+    "Zakef":           "𝅘𝅥 𝅘𝅥𝅮 𝅗𝅥  (Zaqef Qatan)",
+    "Zakef Gadol":     "𝅘𝅥 𝅘𝅥 𝅗𝅥  (Zaqef Gadol)",
+    "Shalshelet":      "𝅘𝅥𝅮𝅘𝅥𝅮𝅘𝅥𝅮 𝅘𝅥𝅮𝅘𝅥𝅮𝅘𝅥𝅮 𝅘𝅥𝅮𝅘𝅥𝅮𝅘𝅥𝅮 𝅗𝅥  (Shalshelet – chain)",
+    "Tipeha":          "𝅘𝅥𝅮 𝅘𝅥  (Tipeha / Tarcha)",
+    "Revia":           "𝅘𝅥 𝅗𝅥  (Revia)",
+    "Tevir":           "𝅘𝅥𝅮 𝅘𝅥 𝅘𝅥𝅮  (Tevir)",
+    "Pashta":          "𝅘𝅥𝅮 𝅘𝅥  (Pashta)",
+    "Yetiv":           "𝅘𝅥 𝅘𝅥𝅮  (Yetiv)",
+    "Zarqa":           "𝅘𝅥𝅮 𝅘𝅥𝅮 𝅘𝅥  (Zarqa)",
+    "Geresh":          "𝅘𝅥𝅮  (Geresh)",
+    "Gershayim":       "𝅘𝅥𝅮 𝅘𝅥𝅮  (Gershayim)",
+    "Pazer":           "𝅘𝅥𝅮 𝅘𝅥𝅮 𝅘𝅥𝅮 𝅘𝅥  (Pazer)",
+    "Qarney Para":     "𝅘𝅥𝅮 𝅘𝅥𝅮 𝅘𝅥 𝅘𝅥  (Qarney Para)",
+    "Telisha Gedola":  "𝅘𝅥𝅮 𝅘𝅥  (Telisha Gedola)",
+    "Munach":          "𝅘𝅥  (Munach)",
+    "Mahpakh":         "𝅘𝅥𝅮 𝅘𝅥  (Mahpakh)",
+    "Merkha":          "𝅘𝅥  (Merkha)",
+    "Merkha Kefula":   "𝅘𝅥 𝅘𝅥  (Merkha Kefula)",
+    "Darga":           "𝅘𝅥𝅮 𝅘𝅥𝅮 𝅘𝅥  (Darga)",
+    "Qadma":           "𝅘𝅥𝅮  (Qadma / Azla)",
+    "Telisha Qetana":  "𝅘𝅥𝅮  (Telisha Qetana)",
+    "Yerah Ben Yomo":  "𝅘𝅥 𝅘𝅥 𝅘𝅥  (Yerah Ben Yomo / Galgal)",
+    "Ole":             "𝅘𝅥𝅮  (Ole)",
+    "Iluy":            "𝅘𝅥𝅮  (Iluy)",
+    "Dehi":            "𝅘𝅥  (Dehi)",
+    "Zinor":           "𝅘𝅥𝅮 𝅘𝅥𝅮  (Zinor)",
+    "Unknown":         "—",
+}
 
 
 class MainWindow(QMainWindow):
@@ -51,39 +85,30 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        # Track current selection and display modes
         self.current_parsha: str | None = None
         self.current_book: str | None = None
         self.current_view_mode: str = "modern"
         self.current_color_mode: str = "trope_colors"
-        # Load configuration and connector
         config = get_app_config()
         connector_config = config.get("connector", default={})
         self.connector: BaseConnector = get_default_connector(connector_config)
-        # Build UI
         self.init_ui()
 
     def init_ui(self) -> None:
-        """Set up the window title, palette and child widgets."""
         self.setWindowTitle("TropeTrainer 2.0 - Torah Reading Trainer")
         self.setGeometry(100, 100, 1200, 800)
-        # Light grey background to match the classic application
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor(240, 240, 240))
         self.setPalette(palette)
-        # Menu bar and toolbar
         self.create_menu_bar()
         self.create_modern_toolbar()
-        # Central area
         self.create_central_widget()
-        # Status bar
         self.statusBar().showMessage("Ready - Select File → Open Reading to begin")
 
     # ------------------------------------------------------------------
     # Menu bar
     # ------------------------------------------------------------------
     def create_menu_bar(self) -> None:
-        """Create the application menu bar."""
         menubar = self.menuBar()
         # FILE
         file_menu = menubar.addMenu("&File")
@@ -91,7 +116,6 @@ class MainWindow(QMainWindow):
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_reading_dialog)
         file_menu.addAction(open_action)
-        # Action to open a local text file
         open_file_action = QAction("O&pen Text File...", self)
         open_file_action.setShortcut("Ctrl+T")
         open_file_action.triggered.connect(self.open_text_file)
@@ -104,14 +128,13 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        # PLAY (placeholder for future audio controls)
+        # PLAY
         play_menu = menubar.addMenu("&Play")
         play_action = QAction("&Play", self)
         play_action.setShortcut("Space")
         play_menu.addAction(play_action)
         # VIEW
         view_menu = menubar.addMenu("&View")
-        # View mode sub‑menu
         view_mode_menu = view_menu.addMenu("View Mode")
         modern_action = QAction("&Modern (with vowels)", self)
         modern_action.triggered.connect(lambda: self.set_view_mode("modern"))
@@ -123,7 +146,6 @@ class MainWindow(QMainWindow):
         tikkun_action.triggered.connect(lambda: self.set_view_mode("tikkun"))
         view_mode_menu.addAction(tikkun_action)
         view_menu.addSeparator()
-        # Colour mode sub‑menu
         color_mode_menu = view_menu.addMenu("Color Mode")
         no_colors_action = QAction("&No Colors", self)
         no_colors_action.triggered.connect(lambda: self.set_color_mode("no_colors"))
@@ -143,18 +165,15 @@ class MainWindow(QMainWindow):
     # Toolbar
     # ------------------------------------------------------------------
     def create_modern_toolbar(self) -> None:
-        """Create the primary toolbar with grouped toggle buttons."""
         toolbar = QToolBar()
         toolbar.setIconSize(QSize(32, 32))
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-        # File operations
         toolbar.addAction(QAction("📂", self, toolTip="Open", triggered=self.open_reading_dialog))
         toolbar.addAction(QAction("💾", self, toolTip="Save"))
         toolbar.addAction(QAction("🖨️", self, toolTip="Print"))
         toolbar.addSeparator()
-        # View mode buttons (Group 1)
-        self.view_mode_group = QGroupBox()
+        # View mode buttons
         self.stam_btn = QPushButton("📜\nSTAM")
         self.stam_btn.setCheckable(True)
         self.stam_btn.setToolTip("STAM letters only (no vowels/tropes)")
@@ -171,7 +190,7 @@ class MainWindow(QMainWindow):
         self.tikkun_btn.setToolTip("Tikkun style (two columns)")
         self.tikkun_btn.setFixedSize(70, 50)
         self.tikkun_btn.clicked.connect(lambda: self.set_view_mode("tikkun"))
-        # Colour mode buttons (Group 2)
+        # Colour mode buttons
         self.no_colors_btn = QPushButton("⬜\nNo Color")
         self.no_colors_btn.setCheckable(True)
         self.no_colors_btn.setToolTip("No color highlighting")
@@ -188,7 +207,6 @@ class MainWindow(QMainWindow):
         self.symbol_colors_btn.setToolTip("Color by symbols")
         self.symbol_colors_btn.setFixedSize(80, 50)
         self.symbol_colors_btn.clicked.connect(lambda: self.set_color_mode("symbol_colors"))
-        # Add widgets to toolbar
         toolbar.addWidget(self.stam_btn)
         toolbar.addWidget(self.modern_btn)
         toolbar.addWidget(self.tikkun_btn)
@@ -197,14 +215,13 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.trope_colors_btn)
         toolbar.addWidget(self.symbol_colors_btn)
         toolbar.addSeparator()
-        # Playback controls (placeholders)
+        # Playback controls
         toolbar.addAction(QAction("⏮️", self, toolTip="First"))
         toolbar.addAction(QAction("◀️", self, toolTip="Previous"))
         toolbar.addAction(QAction("⏯️", self, toolTip="Play/Pause"))
         toolbar.addAction(QAction("▶️", self, toolTip="Next"))
         toolbar.addAction(QAction("⏭️", self, toolTip="Last"))
         toolbar.addSeparator()
-        # Tools (placeholders)
         toolbar.addAction(QAction("🔍", self, toolTip="Search"))
         toolbar.addAction(QAction("⚙️", self, toolTip="Settings"))
 
@@ -212,53 +229,77 @@ class MainWindow(QMainWindow):
     # Central widget
     # ------------------------------------------------------------------
     def create_central_widget(self) -> None:
-        """Create the central widget with text and controls panels."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout()
-        # Text panel
+
+        # ── Text panel ──
         text_panel = QWidget()
         text_layout = QVBoxLayout()
-        # Titles
+
+        # Title labels
         self.title_label = QLabel("[Select a Parsha]")
         self.title_label.setFont(QFont("Arial", 18, QFont.Weight.Bold))
         self.title_label.setStyleSheet("color: #8B008B; padding: 10px;")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         text_layout.addWidget(self.title_label)
+
         self.subtitle_label = QLabel("")
         self.subtitle_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         self.subtitle_label.setStyleSheet("color: #8B008B; padding: 5px;")
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         text_layout.addWidget(self.subtitle_label)
+
         self.book_label = QLabel("")
         self.book_label.setFont(QFont("Arial", 12))
         self.book_label.setStyleSheet("color: gray;")
         self.book_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         text_layout.addWidget(self.book_label)
-        # Modern Torah text widget
+
+        # Torah text widget
         self.torah_text = ModernTorahTextWidget()
-        self.torah_text.setPlaceholderText("Select File → Open Reading to choose a Torah portion...")
+        self.torah_text.setPlaceholderText(
+            "Select File → Open Reading to choose a Torah portion..."
+        )
+        # Connect word click signal to update notation panels
+        self.torah_text.word_clicked.connect(self._on_word_clicked)
         text_layout.addWidget(self.torah_text)
-        # Translation
+
+        # Translation panel
         translation_label = QLabel("Translation:")
+        translation_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         text_layout.addWidget(translation_label)
-        self.translation_text = QLabel("")
+        self.translation_text = QLabel(
+            "(Translation placeholder – network unavailable)"
+        )
         self.translation_text.setWordWrap(True)
-        self.translation_text.setStyleSheet("padding: 10px; background-color: white;")
+        self.translation_text.setStyleSheet(
+            "padding: 10px; background-color: white; border: 1px solid #ccc;"
+            " font-size: 14px; direction: rtl;"
+        )
         self.translation_text.setMinimumHeight(60)
+        self.translation_text.setTextFormat(Qt.TextFormat.RichText)
         text_layout.addWidget(self.translation_text)
-        # Musical notation
+
+        # Musical notation panel
         music_label = QLabel("Musical Notation:")
+        music_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         text_layout.addWidget(music_label)
-        self.music_notation = QLabel("")
-        self.music_notation.setStyleSheet("padding: 10px; background-color: white;")
+        self.music_notation = QLabel("Click a word to see its trope notation")
+        self.music_notation.setStyleSheet(
+            "padding: 10px; background-color: white; border: 1px solid #ccc;"
+            " font-size: 16px;"
+        )
         self.music_notation.setMinimumHeight(60)
         text_layout.addWidget(self.music_notation)
+
         text_panel.setLayout(text_layout)
-        # Controls panel
+
+        # ── Controls panel ──
         controls_panel = QWidget()
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(10)
+
         # Melody selection
         melody_group = QGroupBox("Melody")
         melody_layout = QVBoxLayout()
@@ -267,6 +308,7 @@ class MainWindow(QMainWindow):
         self.melody_combo.addItems([
             "Sephardic - Syrian - Halab (Aleppo)",
             "Ashkenazi - Standard",
+            "Ashkenazi - Spiro High Holiday",
         ])
         melody_layout.addWidget(self.melody_combo)
         melody_layout.addWidget(QLabel("Range:"))
@@ -276,14 +318,16 @@ class MainWindow(QMainWindow):
         melody_layout.addWidget(QPushButton("Melody Help"))
         melody_group.setLayout(melody_layout)
         controls_layout.addWidget(melody_group)
+
         # Pronunciation
         pronunciation_group = QGroupBox("Pronunciation/Accent")
         pronunciation_layout = QVBoxLayout()
         self.pronunciation_combo = QComboBox()
-        self.pronunciation_combo.addItems(["Ashkenazi", "Sephardi", "Yemenite"])
+        self.pronunciation_combo.addItems(["Sephardi", "Ashkenazi", "Yemenite"])
         pronunciation_layout.addWidget(self.pronunciation_combo)
         pronunciation_group.setLayout(pronunciation_layout)
         controls_layout.addWidget(pronunciation_group)
+
         # Pitch
         pitch_group = QGroupBox("Pitch")
         pitch_layout = QVBoxLayout()
@@ -293,6 +337,7 @@ class MainWindow(QMainWindow):
         pitch_layout.addWidget(self.pitch_spinbox)
         pitch_group.setLayout(pitch_layout)
         controls_layout.addWidget(pitch_group)
+
         # Speed/Volume
         speed_group = QGroupBox("Speed/Vol")
         speed_layout = QVBoxLayout()
@@ -303,7 +348,9 @@ class MainWindow(QMainWindow):
         speed_layout.addWidget(self.speed_slider)
         self.speed_value_label = QLabel("100%")
         self.speed_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.speed_slider.valueChanged.connect(lambda v: self.speed_value_label.setText(f"{v}%"))
+        self.speed_slider.valueChanged.connect(
+            lambda v: self.speed_value_label.setText(f"{v}%")
+        )
         speed_layout.addWidget(self.speed_value_label)
         speed_layout.addWidget(QLabel("Volume:"))
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
@@ -311,14 +358,28 @@ class MainWindow(QMainWindow):
         speed_layout.addWidget(self.volume_slider)
         self.volume_value_label = QLabel("80%")
         self.volume_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.volume_slider.valueChanged.connect(lambda v: self.volume_value_label.setText(f"{v}%"))
+        self.volume_slider.valueChanged.connect(
+            lambda v: self.volume_value_label.setText(f"{v}%")
+        )
         speed_layout.addWidget(self.volume_value_label)
         speed_group.setLayout(speed_layout)
         controls_layout.addWidget(speed_group)
+
+        # Trope info label (shows info about selected word)
+        self.trope_info_group = QGroupBox("Selected Trope")
+        trope_info_layout = QVBoxLayout()
+        self.trope_info_label = QLabel("Click a word to see info")
+        self.trope_info_label.setWordWrap(True)
+        self.trope_info_label.setStyleSheet("font-size: 12px; padding: 4px;")
+        trope_info_layout.addWidget(self.trope_info_label)
+        self.trope_info_group.setLayout(trope_info_layout)
+        controls_layout.addWidget(self.trope_info_group)
+
         controls_layout.addStretch()
         controls_panel.setLayout(controls_layout)
         controls_panel.setMaximumWidth(250)
-        # Splitter for resizing
+
+        # Splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(text_panel)
         splitter.addWidget(controls_panel)
@@ -328,85 +389,129 @@ class MainWindow(QMainWindow):
         central_widget.setLayout(main_layout)
 
     # ------------------------------------------------------------------
+    # Word click handler
+    # ------------------------------------------------------------------
+    def _on_word_clicked(self, word: str, group_name: str, trope_marks: list) -> None:
+        """Handle a word click from the text widget.
+
+        Updates the musical notation panel and trope info sidebar.
+        """
+        # Musical notation
+        notation = TROPE_NOTATION.get(group_name, "—")
+        marks_str = ", ".join(trope_marks) if trope_marks else "none"
+        self.music_notation.setText(f"{notation}")
+
+        # Translation area: show the word and its trope info
+        group = get_trope_group(group_name)
+        color_swatch = (
+            f'<span style="background-color: {group.color}; '
+            f'padding: 2px 8px; border: 1px solid #333;">&nbsp;</span>'
+        )
+        self.translation_text.setText(
+            f'<div style="direction: rtl; text-align: right;">'
+            f'<b style="font-size: 18px;">{word}</b><br/>'
+            f'Trope: {group_name} {color_swatch}<br/>'
+            f'Marks: {marks_str}</div>'
+        )
+
+        # Sidebar info
+        self.trope_info_label.setText(
+            f"Word: {word}\n"
+            f"Group: {group_name}\n"
+            f"Marks: {marks_str}\n"
+            f"Color: {group.color}\n"
+            f"Rank: {group.rank}"
+        )
+
+        # Update status bar
+        self.statusBar().showMessage(
+            f"Selected: {group_name} | Marks: {marks_str}"
+        )
+
+    # ------------------------------------------------------------------
     # Reading operations
     # ------------------------------------------------------------------
     def open_reading_dialog(self) -> None:
-        """Open the complete reading selection dialog."""
         dialog = OpenReadingDialog(self)
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted and dialog.selected_parsha:
             self.load_parsha(dialog.selected_parsha, dialog.selected_book)
 
     def load_parsha(self, parsha_name: str, book_name: str) -> None:
-        """Load and display a parsha using the configured connector."""
+        """Load and display a parsha using the configured connector.
+
+        This method now loads the **full** reading (all aliyot), not
+        just the first one.  It uses the real trope parser to produce
+        properly coloured tokens.
+        """
         self.current_parsha = parsha_name
         self.current_book = book_name
         # Update titles
         self.title_label.setText(f"[{parsha_name}]")
         self.subtitle_label.setText("")
         self.book_label.setText(book_name)
-        # Fetch the text from the connector.  If the connector provides
-        # a partial retrieval method, use it to avoid loading all aliyot
-        # at once.  Errors are silently ignored and result in empty
-        # content.
+
+        # ── Fetch FULL text (all aliyot) ──
         try:
-            if hasattr(self.connector, "get_parasha_partial"):
-                # Optional keyword arguments may be supported in future
-                text = self.connector.get_parasha_partial(parsha_name)
-            else:
-                text = self.connector.get_parasha(parsha_name)  # type: ignore[attr-defined]
+            # Always use get_parasha for the full reading
+            text = self.connector.get_parasha(parsha_name)
         except Exception:
-            text = ""
-        tokens = self._tokenise(text)
-        self.torah_text.set_text(tokens)
-        # For now set translation and music notation to placeholders.
-        self.translation_text.setText("")
-        self.music_notation.setText("")
-        # Update status bar
+            # Fallback: try partial if full fails
+            try:
+                if hasattr(self.connector, "get_parasha_partial"):
+                    text = self.connector.get_parasha_partial(parsha_name)
+                else:
+                    text = ""
+            except Exception:
+                text = ""
+
+        # ── Tokenise with the real trope parser ──
+        tokens = tokenise(text)
+        self.torah_text.set_tokens(tokens)
+
+        # Reset notation panels
+        self.translation_text.setText(
+            "(Translation placeholder – network unavailable)"
+        )
+        self.music_notation.setText("Click a word to see its trope notation")
+        self.trope_info_label.setText("Click a word to see info")
+
+        # Status bar
+        word_count = len(tokens)
         self.statusBar().showMessage(
-            f"Loaded: {parsha_name} ({book_name}) | View: {self.current_view_mode.title()} | "
+            f"Loaded: {parsha_name} ({book_name}) | "
+            f"{word_count} words | "
+            f"View: {self.current_view_mode.title()} | "
             f"Color: {self.current_color_mode.replace('_', ' ').title()}"
         )
 
     def set_view_mode(self, mode: str) -> None:
-        """Set the view mode and update the display and toggle states."""
         self.current_view_mode = mode
         self.torah_text.set_view_mode(mode)
-        # Update toggle buttons
         self.modern_btn.setChecked(mode == "modern")
         self.stam_btn.setChecked(mode == "stam")
         self.tikkun_btn.setChecked(mode == "tikkun")
-        # Update status bar
         self.statusBar().showMessage(
-            f"View: {mode.replace('_', ' ').title()} | Color: {self.current_color_mode.replace('_', ' ').title()}"
+            f"View: {mode.replace('_', ' ').title()} | "
+            f"Color: {self.current_color_mode.replace('_', ' ').title()}"
         )
 
     def set_color_mode(self, mode: str) -> None:
-        """Set the colour mode and update the display and toggle states."""
         self.current_color_mode = mode
         self.torah_text.set_color_mode(mode)
-        # Update toggle buttons
         self.no_colors_btn.setChecked(mode == "no_colors")
         self.trope_colors_btn.setChecked(mode == "trope_colors")
         self.symbol_colors_btn.setChecked(mode == "symbol_colors")
-        # Update status bar
         self.statusBar().showMessage(
-            f"View: {self.current_view_mode.replace('_', ' ').title()} | Color: {mode.replace('_', ' ').title()}"
+            f"View: {self.current_view_mode.replace('_', ' ').title()} | "
+            f"Color: {mode.replace('_', ' ').title()}"
         )
 
     # ------------------------------------------------------------------
     # File open operation
     # ------------------------------------------------------------------
     def open_text_file(self) -> None:
-        """Prompt the user to open a local Tanach text file (UTF‑8 encoded).
-
-        If the user selects a file, its contents are read, tokenised and
-        displayed in the central text widget.  Titles and status
-        information are updated accordingly.  Unsupported or unreadable
-        files are silently ignored.
-        """
-        # Use QFileDialog to get the path from the user.  Restrict to
-        # plain text files for Tanach passages.
+        """Open a local Tanach text file (UTF-8 encoded)."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Tanach Text File",
@@ -419,40 +524,24 @@ class MainWindow(QMainWindow):
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
         except Exception:
-            # Reading failed; do nothing
             return
-        # Tokenise and display
-        tokens = self._tokenise(text)
-        self.torah_text.set_text(tokens)
-        # Update labels: use file name as parsha name; book unspecified
-        import os
 
+        # Tokenise with the real parser
+        tokens = tokenise(text)
+        self.torah_text.set_tokens(tokens)
+
+        import os
         base_name = os.path.basename(file_path)
         self.title_label.setText(f"[{base_name}]")
         self.subtitle_label.setText("")
         self.book_label.setText("Local File")
         self.translation_text.setText("")
-        self.music_notation.setText("")
+        self.music_notation.setText("Click a word to see its trope notation")
         self.current_parsha = base_name
         self.current_book = "Local File"
         self.statusBar().showMessage(
-            f"Loaded local file: {base_name} | View: {self.current_view_mode.title()} | "
+            f"Loaded local file: {base_name} | "
+            f"{len(tokens)} words | "
+            f"View: {self.current_view_mode.title()} | "
             f"Color: {self.current_color_mode.replace('_', ' ').title()}"
         )
-
-    # ------------------------------------------------------------------
-    # Utility
-    # ------------------------------------------------------------------
-    def _tokenise(self, text: str) -> List[Tuple[str, str, str]]:
-        """Naively split a passage into tokens for display.
-
-        This method is a placeholder for a proper parser that would
-        extract cantillation marks and assign trope groups.  Currently
-        it splits on whitespace and assigns a dummy trope group and
-        symbol (✱) to each word.
-        """
-        words = text.split()
-        tokens: List[Tuple[str, str, str]] = []
-        for w in words:
-            tokens.append((w, "Sof Pasuk", "✱"))
-        return tokens
