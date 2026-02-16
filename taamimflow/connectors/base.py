@@ -1,58 +1,42 @@
-"""Abstract base classes for text connectors.
+"""Base interface for connectors.
 
-Connectors are responsible for fetching biblical text and related
-metadata from various backends (e.g., Sefaria, local files or custom
-APIs).  To ensure a consistent interface across backends, all
-connectors should inherit from :class:`BaseConnector` and implement
-the abstract methods defined therein.
+Connectors encapsulate the logic for retrieving the text of a
+Torah reading.  Subclasses must implement at least the
+:meth:`get_parasha` method, which returns the full text for a named
+parasha.  Optionally, :meth:`get_parasha_partial` may be provided to
+return a list of individual aliyah texts for piecewise loading.
 """
 
 from __future__ import annotations
+from typing import List
 
-import abc
-from datetime import date
-from typing import Any, Dict, List, Optional
+class BaseConnector:
+    """Abstract base class for all connectors."""
 
-
-class BaseConnector(abc.ABC):
-    """Abstract base class defining the minimal connector interface."""
-
-    @abc.abstractmethod
-    def get_text(self, reference: str, *, with_cantillation: bool = True) -> str:
-        """Return a textual range from the Hebrew Bible.
-
-        :param reference: A Sefaria-style reference, e.g. ``"Genesis 1:1-2:3"``.
-        :param with_cantillation: Whether to include cantillation marks and vowels.
-        :return: The requested text as a single string.  Multi‑verse ranges
-            should be concatenated with appropriate separators (e.g.
-            whitespace or newline characters).  Exact formatting is left
-            to the implementation.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
     def get_parasha(self, parasha_name: str, *, cycle: int = 0) -> str:
-        """Return the full text of a named parasha.
+        """Return the full text for the given parasha.
 
-        :param parasha_name: Name of the parasha (e.g. ``"Bereishis"``).
-        :param cycle: Cycle number for triennial readings.  Zero means the
-            full annual reading.
-        :return: The text of the parasha.
+        The ``cycle`` parameter may be used to specify the triennial
+        year (1–3).  Implementations may ignore this parameter if the
+        data source does not support triennial readings.
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    def get_calendar(self, dt: date) -> Dict[str, Any]:
-        """Return calendar information for a given date.
+    def get_parasha_partial(self, parasha_name: str, *, cycle: int = 0) -> List[str]:
+        """Return a list of aliyah texts for the given parasha.
 
-        The returned dictionary may include keys such as ``"parasha"``,
-        ``"holiday"``, ``"aliyot"``, etc., depending on the backend.
+        By default this simply returns a single element list
+        containing the full parasha text returned by :meth:`get_parasha`.
+        Subclasses may override this to return each aliyah as a
+        separate entry for piecewise loading.
+        """
+        return [self.get_parasha(parasha_name, cycle=cycle)]
 
-        :param dt: The date for which to fetch calendar data.
-        :return: A dictionary of calendar information.
+    def get_text(self, reference: str, *, with_cantillation: bool = True) -> str:
+        """Return the text for an arbitrary reference.
+
+        Connectors that support direct text references may implement
+        this method to fetch the content of a specific range.  The
+        default implementation always raises ``NotImplementedError``.
         """
         raise NotImplementedError
-
-    # Optionally connectors may implement additional methods such as
-    # get_haftarah(), get_megillah(), search(), etc.  Derived classes
-    # should document any extra capabilities they provide.

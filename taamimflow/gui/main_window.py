@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSplitter,
     QDialog,
+    QFileDialog,
 )
 from PyQt6.QtGui import QAction, QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, QSize
@@ -90,6 +91,11 @@ class MainWindow(QMainWindow):
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_reading_dialog)
         file_menu.addAction(open_action)
+        # Action to open a local text file
+        open_file_action = QAction("O&pen Text File...", self)
+        open_file_action.setShortcut("Ctrl+T")
+        open_file_action.triggered.connect(self.open_text_file)
+        file_menu.addAction(open_file_action)
         file_menu.addSeparator()
         customize_action = QAction("&Customize...", self)
         file_menu.addAction(customize_action)
@@ -339,10 +345,16 @@ class MainWindow(QMainWindow):
         self.title_label.setText(f"[{parsha_name}]")
         self.subtitle_label.setText("")
         self.book_label.setText(book_name)
-        # Fetch the text from the connector.  Errors are silently
-        # ignored and result in empty content.
+        # Fetch the text from the connector.  If the connector provides
+        # a partial retrieval method, use it to avoid loading all aliyot
+        # at once.  Errors are silently ignored and result in empty
+        # content.
         try:
-            text = self.connector.get_parasha(parsha_name)
+            if hasattr(self.connector, "get_parasha_partial"):
+                # Optional keyword arguments may be supported in future
+                text = self.connector.get_parasha_partial(parsha_name)
+            else:
+                text = self.connector.get_parasha(parsha_name)  # type: ignore[attr-defined]
         except Exception:
             text = ""
         tokens = self._tokenise(text)
@@ -380,6 +392,52 @@ class MainWindow(QMainWindow):
         # Update status bar
         self.statusBar().showMessage(
             f"View: {self.current_view_mode.replace('_', ' ').title()} | Color: {mode.replace('_', ' ').title()}"
+        )
+
+    # ------------------------------------------------------------------
+    # File open operation
+    # ------------------------------------------------------------------
+    def open_text_file(self) -> None:
+        """Prompt the user to open a local Tanach text file (UTF‑8 encoded).
+
+        If the user selects a file, its contents are read, tokenised and
+        displayed in the central text widget.  Titles and status
+        information are updated accordingly.  Unsupported or unreadable
+        files are silently ignored.
+        """
+        # Use QFileDialog to get the path from the user.  Restrict to
+        # plain text files for Tanach passages.
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Tanach Text File",
+            "",
+            "Text Files (*.txt);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            # Reading failed; do nothing
+            return
+        # Tokenise and display
+        tokens = self._tokenise(text)
+        self.torah_text.set_text(tokens)
+        # Update labels: use file name as parsha name; book unspecified
+        import os
+
+        base_name = os.path.basename(file_path)
+        self.title_label.setText(f"[{base_name}]")
+        self.subtitle_label.setText("")
+        self.book_label.setText("Local File")
+        self.translation_text.setText("")
+        self.music_notation.setText("")
+        self.current_parsha = base_name
+        self.current_book = "Local File"
+        self.statusBar().showMessage(
+            f"Loaded local file: {base_name} | View: {self.current_view_mode.title()} | "
+            f"Color: {self.current_color_mode.replace('_', ' ').title()}"
         )
 
     # ------------------------------------------------------------------

@@ -24,11 +24,19 @@ from typing import Any, Dict
 import re
 import html as _html
 
+import requests
+
+from .base import BaseConnector
+from ..data.sedrot import load_sedrot, SedraOption
+from ..utils.paths import find_data_file
+from ..utils.refs import normalize_ref
+
 # Regular expressions and helpers for cleaning Sefaria HTML responses.
 _RE_BR = re.compile(r"(?i)<br\s*/?>")
 _RE_P = re.compile(r"(?i)</p>\s*<p>")
 _RE_TAG = re.compile(r"<[^>]+>")
 _RE_WS = re.compile(r"[ \t\u00A0]+")
+
 
 def _clean_sefaria_text(s: str) -> str:
     """Clean up HTML markup and whitespace in Sefaria responses.
@@ -63,13 +71,6 @@ def _clean_sefaria_text(s: str) -> str:
     # Collapse more than two consecutive newlines into two
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
-
-import requests
-
-from .base import BaseConnector
-from ..data.sedrot import load_sedrot, SedraOption
-from ..utils.paths import find_data_file
-from ..utils.refs import normalize_ref
 
 
 class SefariaConnector(BaseConnector):
@@ -121,6 +122,7 @@ class SefariaConnector(BaseConnector):
         # The API returns an array of strings under "he" or "text".
         # Flatten nested lists and combine them with newlines.
         text_list = data.get("he") or data.get("text") or []
+
         def _flatten(lst: Any) -> list[str]:
             result: list[str] = []
             for item in lst:
@@ -131,6 +133,7 @@ class SefariaConnector(BaseConnector):
                 else:
                     result.append(str(item))
             return result
+
         flat = _flatten(text_list)
         # Clean each piece of text to remove HTML tags and normalize whitespace
         cleaned: list[str] = []
@@ -154,8 +157,6 @@ class SefariaConnector(BaseConnector):
         :raises ConnectionError: If the Sefaria API call fails.
         """
 
-        # Load sedrot definitions once per process.  In a real
-        # implementation this could be cached at module level.
         # Locate sedrot.xml in a robust way
         sedrot_xml = find_data_file("sedrot.xml")
         sedrot = load_sedrot(sedrot_xml)
@@ -210,3 +211,57 @@ class SefariaConnector(BaseConnector):
             category = item.get("category", "other")
             events.setdefault(category, []).append(item)
         return events
+
+    # ------------------------------------------------------------------
+    # Partial reading support
+    # ------------------------------------------------------------------
+    def get_parasha_partial(self, parasha_name: str, *, cycle: int = 0) -> str:
+        """Retrieve a partial Torah text for a given parasha.
+
+        This method returns only the first aliyah of the specified
+        parasha.  It uses the same ``sedrot.xml`` definitions as
+        :meth:`get_parasha`.  If the first aliyah is not defined or
+        cannot be fetched, it falls back to returning the full
+        parasha via :meth:`get_parasha`.
+
+        :param parasha_name: The name of the parasha to retrieve.
+        :param cycle: The triennial cycle year (0 for full reading).
+        :return: Hebrew text for the first aliyah or full parasha.
+        """
+        try:
+            sedrot_xml = find_data_file("sedrot.xml")
+            sedrot = load_sedrot(sedrot_xml)
+            for sedra in sedrot:
+                if sedra.name.lower().replace(" ", "").startswith(parasha_name.lower().replace(" ", "")):
+                    # Find the matching option
+                    selected_option: SedraOption | None = None
+                    for opt in sedra.options:
+                        if opt.type.lower() == "torah":
+                            opt_cycle = opt.cycle or 0
+                            if opt_cycle == cycle:
+                                selected_option = opt
+                                break
+                    if not selected_option:
+                        selected_option = next((o for o in sedra.options if o.type.lower() == "torah"), None)
+                    if not selected_option:
+                        return self.get_parasha(parasha_name)
+                    # Retrieve the first aliyah
+                    for aliyah in [
+                        "KOHEN",
+                        "LEVI",
+                        "SHLISHI",
+                        "REVII",
+                        "CHAMISHI",
+                        "SHISHI",
+                        "SHVII",
+                    ]:
+                        if aliyah in selected_option.aliyot:
+                            ref = selected_option.aliyot[aliyah]
+                            return self.get_text(ref)
+                    # If no aliyah found fall back to full
+                    return self.get_parasha(parasha_name)
+            # If parasha not found fallback
+            return self.get_parasha(parasha_name)
+        except Exception:
+            # Fallback to full parasha on errors
+            return self.get_parasha(parasha_name)
