@@ -1,0 +1,64 @@
+{
+  "app": {
+    "name": "TropTrainer 2.0",
+    "version": "1.0.0-alpha",
+    "language": "de",
+    "first_run": true
+  },
+  
+  "display": {
+    "theme": "light",
+    "font_size": 16,
+    "hebrew_font": "SBL Hebrew",
+    "show_nikud": true,
+    "show_tropes": true,
+    "show_translations": true,
+    "text_direction": "rtl"
+  },
+  
+  "audio": {
+    "default_volume": 0.8,
+    "auto_play": false,
+    "auto_repeat": false,
+    "speed_range": [0.5, 2.0],
+    "default_speed": 1.0,
+    "audio_format": "mp3"
+  },
+  
+  "calendar": {
+    "diaspora_mode": true,
+    "show_hebrew_dates": true,
+    "highlight_holidays": true,
+    "week_starts_on": "saturday"
+  },
+  
+  "practice": {
+    "session_duration": 30,
+    "difficulty": "intermediate",
+    "show_hints": true,
+    "immediate_feedback": true,
+    "track_progress": true,
+    "daily_goal_minutes": 15
+  },
+  
+  "user": {
+    "current_user": null,
+    "multi_user_mode": false,
+    "save_progress": true
+  },
+  
+  "paths": {
+    "audio_directory": "assets/audio",
+    "data_directory": "assets/data",
+    "fonts_directory": "assets/fonts",
+    "user_data": "user_data",
+    "database": "database/troptrainer.db"
+  },
+  
+  "advanced": {
+    "debug_mode": false,
+    "log_level": "INFO",
+    "auto_update": true,
+    "telemetry": false
+  }
+}

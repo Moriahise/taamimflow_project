@@ -1,0 +1,89 @@
+# TropTrainer 2.0 - Python Dependencies
+
+# ============================================
+# GUI Framework
+# ============================================
+# Option 1: PyQt6 (empfohlen - professioneller Look)
+PyQt6>=6.6.0
+PyQt6-WebEngine>=6.6.0
+
+# Option 2: CustomTkinter (wenn Sie Tkinter bevorzugen)
+# customtkinter>=5.2.0
+
+# ============================================
+# Audio Processing
+# ============================================
+pygame>=2.5.0              # Audio-Wiedergabe
+mutagen>=1.47.0            # Audio-Metadaten (MP3, WAV, etc.)
+pydub>=0.25.1              # Audio-Manipulation
+
+# ============================================
+# Database & ORM
+# ============================================
+SQLAlchemy>=2.0.23         # ORM für Datenbank
+alembic>=1.13.1            # Datenbank-Migrationen
+
+# ============================================
+# Hebrew & BiDi Text Support
+# ============================================
+python-bidi>=0.4.2         # Bidirektionaler Text (RTL)
+PyArabic>=0.6.15           # Arabische/Hebräische Text-Utilities
+# NOTE: pyicu builds native code and often fails on Windows without ICU installed.
+# It is therefore optional; comment out by default.  Uncomment if ICU is available.
+# pyicu>=2.12                # Unicode-Support
+
+# ============================================
+# Hebrew Calendar
+# ============================================
+convertdate>=2.4.0         # Kalender-Konvertierung
+pyluach>=2.2.0             # Hebräischer Kalender
+hijri-converter>=2.3.1     # Zusätzliche Kalender-Funktionen
+
+# ============================================
+# Data Validation & Configuration
+# ============================================
+pydantic>=2.5.2            # Datenvalidierung
+python-dotenv>=1.0.0       # .env Umgebungsvariablen
+pyyaml>=6.0.1              # YAML-Config Support
+
+# ============================================
+# Logging & Monitoring
+# ============================================
+loguru>=0.7.2              # Besseres Logging
+colorlog>=6.8.0            # Farbiges Logging
+
+# ============================================
+# Utilities
+# ============================================
+requests>=2.31.0           # HTTP-Anfragen (für API-Zugriff)
+python-dateutil>=2.8.2     # Datums-Utilities
+pathlib>=1.0.1             # Pfad-Verwaltung
+typing-extensions>=4.9.0   # Typ-Hints
+
+# ============================================
+# Testing
+# ============================================
+pytest>=7.4.3              # Testing Framework
+pytest-cov>=4.1.0          # Code Coverage
+pytest-qt>=4.2.0           # Qt-Testing (falls PyQt6)
+
+# ============================================
+# Development Tools
+# ============================================
+black>=23.12.1             # Code Formatter
+pylint>=3.0.3              # Code Linter
+mypy>=1.7.1                # Type Checker
+pre-commit>=3.6.0          # Git Hooks
+
+# ============================================
+# Documentation
+# ============================================
+sphinx>=7.2.6              # Dokumentation
+sphinx-rtd-theme>=2.0.0    # ReadTheDocs Theme
+
+# ============================================
+# Build & Distribution
+# ============================================
+pyinstaller>=6.3.0         # Executable erstellen
+setuptools>=69.0.2         # Package Setup
+wheel>=0.42.0              # Build Wheels
