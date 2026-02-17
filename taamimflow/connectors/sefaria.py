@@ -8,6 +8,14 @@ raise a :class:`ConnectionError`.  To use this connector in a
 production environment, ensure that outbound HTTPS requests to
 ``sefaria.org`` are permitted.
 
+New methods added for Ta'amimFlow:
+
+* :meth:`get_maftir`  – retrieve the Maftir (additional reading) for a
+  given parasha, with fallback to the last aliyah of the Torah reading.
+* :meth:`get_haftarah` – retrieve the Haftarah for a given parasha.
+* :meth:`_retrieve_sedra_option` – internal helper to find a
+  :class:`SedraOption` of a given type from ``sedrot.xml``.
+
 For details on the Sefaria API, see the documentation at
 https://developers.sefaria.org.  The endpoints used here are based on
 the v2/v3 ``texts`` and ``calendars`` APIs.  Should these endpoints
@@ -17,12 +25,12 @@ change, adjust the URL construction accordingly.
 from __future__ import annotations
 
 import json
-from datetime import date
-from pathlib import Path
-from typing import Any, Dict
-
+import logging
 import re
 import html as _html
+from datetime import date
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -30,6 +38,8 @@ from .base import BaseConnector
 from ..data.sedrot import load_sedrot, SedraOption
 from ..utils.paths import find_data_file
 from ..utils.refs import normalize_ref
+
+logger = logging.getLogger(__name__)
 
 # Regular expressions and helpers for cleaning Sefaria HTML responses.
 _RE_BR = re.compile(r"(?i)<br\s*/?>")
@@ -73,16 +83,37 @@ def _clean_sefaria_text(s: str) -> str:
     return s.strip()
 
 
+# Ordered list of aliyah keys used throughout the connector.
+_ALIYAH_ORDER: List[str] = [
+    "KOHEN", "LEVI", "SHLISHI", "REVII",
+    "CHAMISHI", "SHISHI", "SHVII",
+]
+
+
 class SefariaConnector(BaseConnector):
-    """Fetch biblical text and calendar information using Sefaria's API."""
+    """Fetch biblical text and calendar information using Sefaria's API.
+
+    This class provides methods to retrieve Torah text, Maftir, Haftarah
+    and calendar data.  It uses the built‑in ``sedrot.xml`` definitions
+    to resolve parasha names into verse ranges and then fetches the
+    Hebrew text from Sefaria's API.
+
+    :param base_url: The base URL for the Sefaria API.
+    """
 
     def __init__(self, base_url: str = "https://www.sefaria.org/api") -> None:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
 
+    # ------------------------------------------------------------------ #
+    # Low‑level request helper
+    # ------------------------------------------------------------------ #
     def _request(self, path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        url = f"{self.base_url}/{path.lstrip('/') }"
-        # Use a reasonable timeout to avoid hanging indefinitely if the API is slow.
+        """Send a GET request to the Sefaria API and return JSON.
+
+        :raises ConnectionError: If the API returns a non‑200 status.
+        """
+        url = f"{self.base_url}/{path.lstrip('/')}"
         resp = self.session.get(
             url,
             params=params or {},
@@ -90,37 +121,34 @@ class SefariaConnector(BaseConnector):
             timeout=30,
         )
         if resp.status_code != 200:
-            raise ConnectionError(f"Sefaria API responded with status {resp.status_code} for {url}")
+            raise ConnectionError(
+                f"Sefaria API responded with status {resp.status_code} for {url}"
+            )
         return resp.json()
 
+    # ------------------------------------------------------------------ #
+    # Text retrieval
+    # ------------------------------------------------------------------ #
     def get_text(self, reference: str, *, with_cantillation: bool = True) -> str:
         """Retrieve a single continuous range of text.
 
         This implementation uses the v2 ``texts`` endpoint.  The "ref"
-        parameter should be in English (e.g. "Genesis 1:1-2:3").
+        parameter should be in English (e.g. ``"Genesis 1:1-2:3"``).
         ``with_cantillation`` toggles the inclusion of nikkud and
-        trope marks; setting it to ``False`` will strip these signs via
-        Sefaria's ``stripItags`` and ``vhe" parameters.
-        """
+        trope marks.
 
-        # Normalize TropeTrainer style references to Sefaria notation
+        :param reference: Sefaria‑style reference string.
+        :param with_cantillation: Whether to include vowels and trope.
+        :return: Cleaned Hebrew text.
+        """
         reference = normalize_ref(reference)
-        params: Dict[str, Any] = {
-            "context": 0,  # do not include extra context
-            "pad": 0,
-        }
+        params: Dict[str, Any] = {"context": 0, "pad": 0}
         if with_cantillation:
-            # Request Hebrew with vowels and trope (vhe = vocalized Hebrew)
             params["lang"] = "he"
         else:
-            # ``with_cantillation`` off uses untagged text: vhe=1 returns
-            # nikud but no trope; there is no dedicated parameter to
-            # remove both, so the caller may post‑process further.
             params["lang"] = "he"
             params["vhe"] = 1
         data = self._request(f"texts/{reference}", params=params)
-        # The API returns an array of strings under "he" or "text".
-        # Flatten nested lists and combine them with newlines.
         text_list = data.get("he") or data.get("text") or []
 
         def _flatten(lst: Any) -> list[str]:
@@ -135,15 +163,92 @@ class SefariaConnector(BaseConnector):
             return result
 
         flat = _flatten(text_list)
-        # Clean each piece of text to remove HTML tags and normalize whitespace
-        cleaned: list[str] = []
-        for item in flat:
-            # Skip empty or None items
-            if not item:
-                continue
-            cleaned.append(_clean_sefaria_text(item))
+        cleaned: list[str] = [_clean_sefaria_text(item) for item in flat if item]
         return "\n".join(cleaned)
 
+    # ------------------------------------------------------------------ #
+    # Sedra option retrieval helper
+    # ------------------------------------------------------------------ #
+    def _retrieve_sedra_option(
+        self,
+        parasha_name: str,
+        type_filter: str,
+        cycle: int = 0,
+    ) -> SedraOption | None:
+        """Internal helper to find a :class:`SedraOption` of a given type.
+
+        Searches ``sedrot.xml`` for the parasha matching *parasha_name*
+        and returns the first option whose ``type`` matches
+        *type_filter* and whose ``cycle`` matches *cycle*.  If no
+        exact match is found, the first option of the requested type is
+        returned as a fallback.
+
+        :param parasha_name: Name of the parasha to search for.
+        :param type_filter: Desired option type (e.g. ``'torah'``,
+            ``'maftir'``, ``'haftarah'``).
+        :param cycle: Triennial cycle (0 for annual reading).
+        :return: The matching :class:`SedraOption` or ``None``.
+        """
+        try:
+            sedrot_xml = find_data_file("sedrot.xml")
+            sedrot = load_sedrot(sedrot_xml)
+        except Exception:
+            logger.warning("Could not load sedrot.xml", exc_info=True)
+            return None
+
+        key = parasha_name.lower().replace(" ", "")
+        type_filter_lc = type_filter.lower()
+
+        for sedra in sedrot:
+            if sedra.name.lower().replace(" ", "").startswith(key):
+                # First pass: exact match on type and cycle
+                for opt in sedra.options:
+                    if opt.type.lower() == type_filter_lc:
+                        opt_cycle = opt.cycle or 0
+                        if opt_cycle == (cycle or 0):
+                            return opt
+
+                # Second pass: fallback to first option of the requested type
+                for opt in sedra.options:
+                    if opt.type.lower() == type_filter_lc:
+                        return opt
+                return None
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Helper: fetch text for all aliyot in a SedraOption
+    # ------------------------------------------------------------------ #
+    def _fetch_aliyot_text(
+        self,
+        option: SedraOption,
+        keys: List[str] | None = None,
+    ) -> str:
+        """Fetch and concatenate text for the aliyot in *option*.
+
+        :param option: The :class:`SedraOption` whose aliyot to fetch.
+        :param keys: If given, only these keys are retrieved (in order).
+            Otherwise all aliyot in ``_ALIYAH_ORDER`` are tried.
+        :return: Concatenated Hebrew text.
+        """
+        aliyot: Dict[str, str] = getattr(option, "aliyot", None) or {}
+        if not aliyot:
+            return ""
+
+        target_keys = keys or _ALIYAH_ORDER
+        pieces: list[str] = []
+        for k in target_keys:
+            ref = aliyot.get(k)
+            if ref:
+                try:
+                    pieces.append(self.get_text(ref))
+                except Exception:
+                    logger.debug("Failed to fetch aliyah %s (%s)", k, ref)
+                    continue
+        return "\n".join(pieces)
+
+    # ------------------------------------------------------------------ #
+    # Parasha (full Torah reading)
+    # ------------------------------------------------------------------ #
     def get_parasha(self, parasha_name: str, *, cycle: int = 0) -> str:
         """Retrieve the full Torah text for a given parasha.
 
@@ -155,113 +260,185 @@ class SefariaConnector(BaseConnector):
 
         :raises FileNotFoundError: If ``sedrot.xml`` is not found.
         :raises ConnectionError: If the Sefaria API call fails.
+        :raises ValueError: If the parasha or option is not found.
         """
-
-        # Locate sedrot.xml in a robust way
-        sedrot_xml = find_data_file("sedrot.xml")
-        sedrot = load_sedrot(sedrot_xml)
-        # Find the matching sedra
-        for sedra in sedrot:
-            if sedra.name.lower().replace(" ", "").startswith(parasha_name.lower().replace(" ", "")):
-                # Choose the first option matching the cycle and type
-                selected_option: SedraOption | None = None
-                for opt in sedra.options:
-                    if opt.type.lower() == "torah":
-                        # Cycle 0 means full reading; if cycle is None treat as 0
-                        opt_cycle = opt.cycle or 0
-                        if opt_cycle == cycle:
-                            selected_option = opt
-                            break
-                if not selected_option:
-                    # Fallback to first Torah option
-                    selected_option = next((o for o in sedra.options if o.type.lower() == "torah"), None)
-                if not selected_option:
-                    raise ValueError(f"No Torah option found for parasha {parasha_name}")
-                # Concatenate all aliyot ranges into a single reference
-                text_pieces: list[str] = []
-                for aliyah in [
-                    "KOHEN",
-                    "LEVI",
-                    "SHLISHI",
-                    "REVII",
-                    "CHAMISHI",
-                    "SHISHI",
-                    "SHVII",
-                ]:
-                    if aliyah in selected_option.aliyot:
-                        ref = selected_option.aliyot[aliyah]
-                        text_pieces.append(self.get_text(ref))
-                return "\n".join(text_pieces)
+        opt = self._retrieve_sedra_option(parasha_name, "torah", cycle)
+        if opt is None:
+            raise ValueError(f"No Torah option found for parasha {parasha_name}")
+        text = self._fetch_aliyot_text(opt)
+        if text:
+            return text
         raise ValueError(f"Parasha not found: {parasha_name}")
 
+    # ------------------------------------------------------------------ #
+    # Partial reading (first aliyah only)
+    # ------------------------------------------------------------------ #
+    def get_parasha_partial(self, parasha_name: str, *, cycle: int = 0) -> str:
+        """Retrieve the first aliyah of a given parasha.
+
+        Falls back to :meth:`get_parasha` if the first aliyah cannot be
+        determined.
+        """
+        try:
+            opt = self._retrieve_sedra_option(parasha_name, "torah", cycle)
+            if opt and getattr(opt, "aliyot", None):
+                for key in _ALIYAH_ORDER:
+                    ref = opt.aliyot.get(key)  # type: ignore[union-attr]
+                    if ref:
+                        return self.get_text(ref)
+        except Exception:
+            pass
+        # Fallback to full reading
+        return self.get_parasha(parasha_name, cycle=cycle)
+
+    # ------------------------------------------------------------------ #
+    # Maftir
+    # ------------------------------------------------------------------ #
+    def get_maftir(self, parasha_name: str, *, cycle: int = 0) -> str:
+        """Retrieve the Maftir (additional reading) for a given parasha.
+
+        The Maftir is typically the last aliyah of the Torah reading or
+        a separate section defined in ``sedrot.xml``.  Lookup order:
+
+        1.  A dedicated ``maftir`` option in ``sedrot.xml``, trying keys
+            ``MAFTIR`` → ``SHVII`` → … → first available aliyah.
+        2.  The ``MAFTIR`` or ``SHVII`` aliyah from the Torah option.
+        3.  The last aliyah of the Torah option (insertion order).
+        4.  Empty string as a final fallback.
+
+        :param parasha_name: Name of the parasha.
+        :param cycle: Triennial cycle (0 for annual).
+        :return: Hebrew text for the Maftir portion.
+        """
+        # 1. Try dedicated maftir option
+        maftir_opt = self._retrieve_sedra_option(parasha_name, "maftir", cycle)
+        if maftir_opt and getattr(maftir_opt, "aliyot", None):
+            aliyot: Dict[str, str] = maftir_opt.aliyot  # type: ignore[assignment]
+            # Try explicit keys in priority order
+            for key in ["MAFTIR", "SHVII", "SHISHI", "CHAMISHI",
+                        "REVII", "SHLISHI", "LEVI", "KOHEN"]:
+                ref = aliyot.get(key)
+                if ref:
+                    try:
+                        return self.get_text(ref)
+                    except Exception:
+                        continue
+            # Concatenate whatever is available
+            text = self._fetch_aliyot_text(maftir_opt)
+            if text:
+                return text
+
+        # 2. Fallback to Torah option's MAFTIR or SHVII
+        torah_opt = self._retrieve_sedra_option(parasha_name, "torah", cycle)
+        if torah_opt and getattr(torah_opt, "aliyot", None):
+            aliyot = torah_opt.aliyot  # type: ignore[assignment]
+            for key in ["MAFTIR", "SHVII"]:
+                ref = aliyot.get(key)
+                if ref:
+                    try:
+                        return self.get_text(ref)
+                    except Exception:
+                        continue
+            # 3. Last aliyah in insertion order
+            last_ref: str | None = None
+            for ref in aliyot.values():
+                last_ref = ref
+            if last_ref:
+                try:
+                    return self.get_text(last_ref)
+                except Exception:
+                    pass
+
+        # 4. Final fallback
+        return ""
+
+    # ------------------------------------------------------------------ #
+    # Haftarah
+    # ------------------------------------------------------------------ #
+    def get_haftarah(
+        self,
+        parasha_name: str,
+        *,
+        cycle: int = 0,
+        for_date: date | None = None,
+    ) -> str:
+        """Retrieve the Haftarah for a given parasha.
+
+        A Haftarah is a reading from the Prophets associated with a
+        parasha.  Lookup order:
+
+        1.  A dedicated ``haftarah`` option in ``sedrot.xml`` whose
+            aliyot are concatenated.
+        2.  Sefaria's calendar API for *for_date* (if provided) to
+            look up the correct Haftarah reference.
+        3.  A direct Sefaria API call using a generated reference of the
+            form ``"Haftarah for <parasha>"``.
+        4.  Empty string as a final fallback.
+
+        :param parasha_name: Name of the parasha.
+        :param cycle: Triennial cycle (currently unused for Haftarah).
+        :param for_date: If given, used to query the Sefaria calendar.
+        :return: Hebrew text for the Haftarah.
+        """
+        # 1. Try dedicated haftarah option from sedrot.xml
+        haft_opt = self._retrieve_sedra_option(parasha_name, "haftarah", cycle)
+        if haft_opt and getattr(haft_opt, "aliyot", None):
+            aliyot: Dict[str, str] = haft_opt.aliyot  # type: ignore[assignment]
+            pieces: list[str] = []
+            for ref in aliyot.values():
+                try:
+                    pieces.append(self.get_text(ref))
+                except Exception:
+                    continue
+            if pieces:
+                return "\n".join(pieces)
+
+        # 2. Try the calendar API with a specific date
+        if for_date is not None:
+            try:
+                cal = self.get_calendar(for_date)
+                # Look for a haftarah entry in the calendar events
+                for category, events in cal.items():
+                    if not isinstance(events, list):
+                        continue
+                    for evt in events:
+                        title = (evt.get("title", {}).get("en", "") or "").lower()
+                        if "haftarah" in title or "haftara" in title:
+                            ref = evt.get("ref")
+                            if ref:
+                                try:
+                                    return self.get_text(ref)
+                                except Exception:
+                                    continue
+            except Exception:
+                logger.debug("Calendar fallback for haftarah failed", exc_info=True)
+
+        # 3. Attempt a direct reference guess
+        try:
+            return self.get_text(f"Haftarah for {parasha_name}")
+        except Exception:
+            pass
+
+        # 4. Final fallback
+        return ""
+
+    # ------------------------------------------------------------------ #
+    # Calendar
+    # ------------------------------------------------------------------ #
     def get_calendar(self, dt: date) -> Dict[str, Any]:
         """Retrieve calendar information for a date from Sefaria.
 
         Uses the ``calendars`` API, which returns an array of events
         (e.g., Torah readings, holidays).  The return value is a
-        simplified dictionary keyed by event type.
-        """
+        simplified dictionary keyed by event category.
 
-        # Format date as ISO string
+        :param dt: The date to query.
+        :return: Dictionary of events grouped by category.
+        """
         iso_date = dt.isoformat()
         data = self._request(f"calendars/{iso_date}")
-        # Simplify the response: group events by category
         events: Dict[str, Any] = {}
-        for item in data.get("events", []):
+        for item in data.get("calendar_items", data.get("events", [])):
             category = item.get("category", "other")
             events.setdefault(category, []).append(item)
         return events
-
-    # ------------------------------------------------------------------
-    # Partial reading support
-    # ------------------------------------------------------------------
-    def get_parasha_partial(self, parasha_name: str, *, cycle: int = 0) -> str:
-        """Retrieve a partial Torah text for a given parasha.
-
-        This method returns only the first aliyah of the specified
-        parasha.  It uses the same ``sedrot.xml`` definitions as
-        :meth:`get_parasha`.  If the first aliyah is not defined or
-        cannot be fetched, it falls back to returning the full
-        parasha via :meth:`get_parasha`.
-
-        :param parasha_name: The name of the parasha to retrieve.
-        :param cycle: The triennial cycle year (0 for full reading).
-        :return: Hebrew text for the first aliyah or full parasha.
-        """
-        try:
-            sedrot_xml = find_data_file("sedrot.xml")
-            sedrot = load_sedrot(sedrot_xml)
-            for sedra in sedrot:
-                if sedra.name.lower().replace(" ", "").startswith(parasha_name.lower().replace(" ", "")):
-                    # Find the matching option
-                    selected_option: SedraOption | None = None
-                    for opt in sedra.options:
-                        if opt.type.lower() == "torah":
-                            opt_cycle = opt.cycle or 0
-                            if opt_cycle == cycle:
-                                selected_option = opt
-                                break
-                    if not selected_option:
-                        selected_option = next((o for o in sedra.options if o.type.lower() == "torah"), None)
-                    if not selected_option:
-                        return self.get_parasha(parasha_name)
-                    # Retrieve the first aliyah
-                    for aliyah in [
-                        "KOHEN",
-                        "LEVI",
-                        "SHLISHI",
-                        "REVII",
-                        "CHAMISHI",
-                        "SHISHI",
-                        "SHVII",
-                    ]:
-                        if aliyah in selected_option.aliyot:
-                            ref = selected_option.aliyot[aliyah]
-                            return self.get_text(ref)
-                    # If no aliyah found fall back to full
-                    return self.get_parasha(parasha_name)
-            # If parasha not found fallback
-            return self.get_parasha(parasha_name)
-        except Exception:
-            # Fallback to full parasha on errors
-            return self.get_parasha(parasha_name)

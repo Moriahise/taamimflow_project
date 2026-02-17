@@ -14,10 +14,27 @@ and text retrieval is performed by the connector returned from
 ``get_default_connector``.  A legacy tokenisation method is retained
 for backward compatibility; the preferred path now uses the real
 :func:`tokenise` function from ``trope_parser``.
+
+Changes in this version (V9 – merged V8 + open‑reading improvements):
+
+* **Preserved from V8:** TropeNotationPanel, trope_parser tokenise,
+  transliteration, word_clicked handler, pronunciation change handler,
+  trope info sidebar, expanded note_map, safe fallback imports.
+* **New:** :meth:`load_parsha` accepts ``reading_type``, ``cycle``,
+  ``date`` and ``diaspora`` parameters and dispatches to the
+  appropriate connector method (``get_parasha``, ``get_maftir`` or
+  ``get_haftarah``).
+* **New:** :meth:`open_reading_dialog` passes the selected reading
+  type, triennial cycle, date and diaspora setting from the dialog.
+* **New:** The status bar shows the current cycle when triennial
+  reading is active.
 """
 
 from __future__ import annotations
 
+import inspect
+import os
+from datetime import date as _date
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
@@ -38,7 +55,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
 )
 from PyQt6.QtGui import QAction, QFont, QColor, QPalette
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QDate
 
 from ..config import get_app_config
 from ..connectors import get_default_connector
@@ -57,7 +74,7 @@ except ImportError:
     _HAS_CUSTOMIZE_DIALOG = False
     DEFAULT_TROPE_COLORS: Dict[str, str] = {}  # type: ignore[no-redef]
 
-# Transliteration module (new)
+# Transliteration module
 try:
     from ..utils.transliteration import (
         transliterate_word,
@@ -85,6 +102,10 @@ class MainWindow(QMainWindow):
         self.current_view_mode: str = "modern"
         self.current_color_mode: str = "trope_colors"
         self.current_pronunciation: str = "Sephardi"
+        # New: track reading‑type, cycle, diaspora from open‑reading dialog
+        self.current_cycle: int = 0
+        self.current_reading_type: str = "Torah"
+        self.current_diaspora: bool = True
         # Load configuration and connector
         config = get_app_config()
         connector_config = config.get("connector", default={})
@@ -94,7 +115,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self) -> None:
         """Set up the window title, palette and child widgets."""
-        self.setWindowTitle("TropeTrainer 2.0 - Torah Reading Trainer")
+        self.setWindowTitle("Ta'amimFlow – Torah Reading Trainer")
         self.setGeometry(100, 100, 1200, 800)
         # Light grey background to match the classic application
         palette = self.palette()
@@ -106,7 +127,7 @@ class MainWindow(QMainWindow):
         # Central area
         self.create_central_widget()
         # Status bar
-        self.statusBar().showMessage("Ready - Select File → Open Reading to begin")
+        self.statusBar().showMessage("Ready – Select File → Open Reading to begin")
 
     # ------------------------------------------------------------------
     # Menu bar  (V5 structure preserved + new features merged)
@@ -116,18 +137,18 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         # FILE
         file_menu = menubar.addMenu("&File")
-        open_action = QAction("&Open Reading...", self)
+        open_action = QAction("&Open Reading…", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_reading_dialog)
         file_menu.addAction(open_action)
         # Action to open a local text file
-        open_file_action = QAction("O&pen Text File...", self)
+        open_file_action = QAction("O&pen Text File…", self)
         open_file_action.setShortcut("Ctrl+T")
         open_file_action.triggered.connect(self.open_text_file)
         file_menu.addAction(open_file_action)
         file_menu.addSeparator()
         # Customize colours (from V5)
-        customize_action = QAction("&Customize...", self)
+        customize_action = QAction("&Customize…", self)
         customize_action.triggered.connect(self.open_customize_dialog)
         file_menu.addAction(customize_action)
         file_menu.addSeparator()
@@ -302,7 +323,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(QAction("⚙️", self, toolTip="Settings"))
 
     # ------------------------------------------------------------------
-    # Central widget  (V5 layout preserved + new panels added)
+    # Central widget  (V5 layout preserved + notation panel + new panels)
     # ------------------------------------------------------------------
     def create_central_widget(self) -> None:
         """Create the central widget with text and controls panels."""
@@ -333,7 +354,7 @@ class MainWindow(QMainWindow):
         self.book_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         text_layout.addWidget(self.book_label)
 
-        # Modern Torah text widget  (+ word_clicked signal – new)
+        # Modern Torah text widget  (+ word_clicked signal from V8)
         self.torah_text = ModernTorahTextWidget()
         self.torah_text.setPlaceholderText(
             "Select File → Open Reading to choose a Torah portion..."
@@ -341,7 +362,7 @@ class MainWindow(QMainWindow):
         self.torah_text.word_clicked.connect(self._on_word_clicked)
         text_layout.addWidget(self.torah_text)
 
-        # Translation  (V5 preserved)
+        # Translation  (V5 preserved with V8 styling)
         translation_label = QLabel("Translation:")
         translation_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         text_layout.addWidget(translation_label)
@@ -364,7 +385,7 @@ class MainWindow(QMainWindow):
         )
         self.music_notation.setMinimumHeight(20)
         text_layout.addWidget(self.music_notation)
-        # NEW: QPainter notation panel with real staff / notes / syllables
+        # V8: QPainter notation panel with real staff / notes / syllables
         self.notation_panel = TropeNotationPanel()
         text_layout.addWidget(self.notation_panel)
 
@@ -375,7 +396,7 @@ class MainWindow(QMainWindow):
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(10)
 
-        # Melody selection  (V5 preserved + extra melody added)
+        # Melody selection  (V5 preserved + extra melody from V8)
         melody_group = QGroupBox("Melody")
         melody_layout = QVBoxLayout()
         melody_layout.addWidget(QLabel("Melody:"))
@@ -394,7 +415,7 @@ class MainWindow(QMainWindow):
         melody_group.setLayout(melody_layout)
         controls_layout.addWidget(melody_group)
 
-        # Pronunciation  (V5 Yemenite preserved + currentTextChanged – new)
+        # Pronunciation  (V5 Yemenite preserved + currentTextChanged from V8)
         pronunciation_group = QGroupBox("Pronunciation/Accent")
         pronunciation_layout = QVBoxLayout()
         self.pronunciation_combo = QComboBox()
@@ -443,7 +464,7 @@ class MainWindow(QMainWindow):
         speed_group.setLayout(speed_layout)
         controls_layout.addWidget(speed_group)
 
-        # Selected Trope info  (new – sidebar detail panel)
+        # Selected Trope info  (V8 – sidebar detail panel)
         self.trope_info_group = QGroupBox("Selected Trope")
         trope_info_layout = QVBoxLayout()
         self.trope_info_label = QLabel("Click a word to see info")
@@ -467,7 +488,7 @@ class MainWindow(QMainWindow):
         central_widget.setLayout(main_layout)
 
     # ------------------------------------------------------------------
-    # Word click handler – notation + transliteration  (new)
+    # Word click handler – notation + transliteration  (from V8)
     # ------------------------------------------------------------------
     def _on_word_clicked(self, word: str, group_name: str, trope_marks: list) -> None:
         """Handle word click: show notation with real notes and transliteration.
@@ -526,7 +547,7 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------------
-    # Pronunciation change  (new)
+    # Pronunciation change  (from V8)
     # ------------------------------------------------------------------
     def _on_pronunciation_changed(self, text: str) -> None:
         """Update the current pronunciation table when the user changes
@@ -534,40 +555,128 @@ class MainWindow(QMainWindow):
         self.current_pronunciation = text
 
     # ------------------------------------------------------------------
-    # Reading operations  (V5 preserved + improved with real parser)
+    # Reading operations  (V8 preserved + NEW reading‑type dispatch)
     # ------------------------------------------------------------------
     def open_reading_dialog(self) -> None:
-        """Open the complete reading selection dialog."""
+        """Open the complete reading selection dialog.
+
+        After the user makes a selection, determine the type of reading
+        (Torah, Haftarah or Maftir), the desired triennial cycle (if
+        enabled) and the date/location options.  Pass these values to
+        :meth:`load_parsha` so it can choose the appropriate connector
+        method.
+        """
         dialog = OpenReadingDialog(self)
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted and dialog.selected_parsha:
-            self.load_parsha(dialog.selected_parsha, dialog.selected_book)
+            # Determine cycle from dialog
+            cycle: int = getattr(dialog, "cycle", 0)
+            if cycle == 0 and hasattr(dialog, "triennial_checkbox"):
+                if dialog.triennial_checkbox.isChecked():
+                    cycle = dialog.cycle_spinbox.value()
 
-    def load_parsha(self, parsha_name: str, book_name: str) -> None:
-        """Load and display a parsha using the configured connector.
+            # Reading type from dialog
+            reading_type = getattr(dialog, "reading_type", "Torah")
 
-        This method loads the **full** reading (all aliyot) using the
-        real trope parser to produce properly coloured tokens.
+            # Date and location
+            selected_date: QDate = getattr(
+                dialog, "selected_date", None
+            ) or QDate.currentDate()
+            diaspora: bool = getattr(dialog, "diaspora", True)
+            if hasattr(dialog, "diaspora_radio"):
+                diaspora = dialog.diaspora_radio.isChecked()
+
+            self.load_parsha(
+                dialog.selected_parsha,
+                dialog.selected_book or "",
+                reading_type=reading_type,
+                cycle=cycle,
+                date=selected_date,
+                diaspora=diaspora,
+            )
+
+    def load_parsha(
+        self,
+        parsha_name: str,
+        book_name: str,
+        *,
+        reading_type: str = "Torah",
+        cycle: int = 0,
+        date: QDate | None = None,
+        diaspora: bool = True,
+    ) -> None:
+        """Load and display a Torah portion, Haftarah or Maftir reading.
+
+        This method loads the reading using the real trope parser to
+        produce properly coloured tokens.
+
+        :param parsha_name: The name of the parsha selected.
+        :param book_name: The name of the book or category.
+        :param reading_type: ``"Torah"``, ``"Haftarah"`` or ``"Maftir"``.
+        :param cycle: Triennial cycle (0 = annual, 1–3).
+        :param date: The date selected in the dialog.
+        :param diaspora: Whether to use the Diaspora calendar.
         """
+        # Store current selection
         self.current_parsha = parsha_name
         self.current_book = book_name
+        self.current_cycle = cycle
+        self.current_reading_type = reading_type
+        self.current_diaspora = diaspora
+
         # Update titles
         self.title_label.setText(f"[{parsha_name}]")
-        self.subtitle_label.setText("")
+        self.subtitle_label.setText(
+            f"{reading_type}" + (f" – Cycle {cycle}" if cycle else "")
+        )
         self.book_label.setText(book_name)
 
-        # ── Fetch FULL text (all aliyot) ──
-        try:
-            text = self.connector.get_parasha(parsha_name)
-        except Exception:
-            # Fallback: try partial if full fails
+        # Convert QDate to Python date for the connector
+        py_date: _date | None = None
+        if date is not None:
             try:
-                if hasattr(self.connector, "get_parasha_partial"):
-                    text = self.connector.get_parasha_partial(parsha_name)
-                else:
-                    text = ""
+                py_date = _date(date.year(), date.month(), date.day())
             except Exception:
-                text = ""
+                py_date = None
+
+        # ── Fetch text based on reading type (NEW dispatch logic) ──
+        text = ""
+        try:
+            rt = reading_type.lower()
+            if rt == "haftarah":
+                if hasattr(self.connector, "get_haftarah"):
+                    kwargs: Dict = {"cycle": cycle}
+                    # Pass date if the connector supports it
+                    sig = inspect.signature(self.connector.get_haftarah)
+                    if "for_date" in sig.parameters and py_date:
+                        kwargs["for_date"] = py_date
+                    text = self.connector.get_haftarah(parsha_name, **kwargs)
+                elif hasattr(self.connector, "get_parasha_partial"):
+                    text = self.connector.get_parasha_partial(parsha_name, cycle=cycle)
+                else:
+                    text = self.connector.get_parasha(parsha_name, cycle=cycle)
+
+            elif rt == "maftir":
+                if hasattr(self.connector, "get_maftir"):
+                    text = self.connector.get_maftir(parsha_name, cycle=cycle)
+                elif hasattr(self.connector, "get_parasha_partial"):
+                    text = self.connector.get_parasha_partial(parsha_name, cycle=cycle)
+                else:
+                    text = self.connector.get_parasha(parsha_name, cycle=cycle)
+
+            else:  # Torah reading
+                # Use full reading (all aliyot)
+                try:
+                    text = self.connector.get_parasha(parsha_name, cycle=cycle)
+                except Exception:
+                    # Fallback: try partial if full fails
+                    if hasattr(self.connector, "get_parasha_partial"):
+                        text = self.connector.get_parasha_partial(parsha_name, cycle=cycle)
+                    else:
+                        text = ""
+
+        except Exception:
+            text = ""
 
         # ── Tokenise with the real trope parser ──
         tokens = tokenise(text)
@@ -581,9 +690,12 @@ class MainWindow(QMainWindow):
         self.notation_panel.set_verse_text("")
         self.trope_info_label.setText("Click a word to see info")
 
-        # Update status bar  (V5 rich format preserved)
+        # Update status bar with comprehensive information
+        cycle_info = f" | Cycle: {cycle}" if cycle else ""
+        diaspora_info = "Diaspora" if diaspora else "Israel"
         self.statusBar().showMessage(
             f"Loaded: {parsha_name} ({book_name}) | {len(tokens)} words | "
+            f"Type: {reading_type} | {diaspora_info}{cycle_info} | "
             f"View: {self.current_view_mode.title()} | "
             f"Color: {self.current_color_mode.replace('_', ' ').title()}"
         )
@@ -627,8 +739,6 @@ class MainWindow(QMainWindow):
         information are updated accordingly.  Unsupported or unreadable
         files are silently ignored.
         """
-        # Use QFileDialog to get the path from the user.  Restrict to
-        # plain text files for Tanach passages.
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Tanach Text File",
@@ -649,8 +759,6 @@ class MainWindow(QMainWindow):
         self.torah_text.set_tokens(tokens)
 
         # Update labels: use file name as parsha name; book unspecified
-        import os
-
         base_name = os.path.basename(file_path)
         self.title_label.setText(f"[{base_name}]")
         self.subtitle_label.setText("")
@@ -696,7 +804,7 @@ class MainWindow(QMainWindow):
         return tokens
 
     # ------------------------------------------------------------------
-    # Translation and music notation  (from V5 – improved for Token)
+    # Translation and music notation  (from V5 – improved for Token in V8)
     # ------------------------------------------------------------------
     def update_translation_and_music(self, tokens) -> None:
         """Populate the translation and musical notation fields.
@@ -741,6 +849,7 @@ class MainWindow(QMainWindow):
         )
 
         # Build a simple music notation line: map trope groups to symbols
+        # (expanded map from V8)
         note_map = {
             "Sof Pasuk": "♪",
             "Zakef Katon": "♬",
