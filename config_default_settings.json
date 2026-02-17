@@ -1,35 +1,53 @@
 {
   "app": {
-    "name": "TropTrainer 2.0",
+    "name": "Ta'amimFlow",
     "version": "1.0.0-alpha",
     "language": "de",
     "first_run": true
+  },
+  
+  "connector": {
+    "_comment": "Text source: 'local' for offline tanach_data/*.txt files, 'sefaria' for online API",
+    "type": "local",
+    "tanach_dir": "tanach_data",
+    "preferred_format": "cantillation",
+    "strip_cantillation": false,
+    "strip_paragraph_markers": true,
+    "sefaria_base_url": "https://www.sefaria.org/api",
+    "sefaria_timeout": 30
   },
   
   "display": {
     "theme": "light",
     "font_size": 16,
     "hebrew_font": "SBL Hebrew",
+    "hebrew_font_fallback": "Ezra SIL, Taamey Frank CLM, Arial",
     "show_nikud": true,
     "show_tropes": true,
     "show_translations": true,
-    "text_direction": "rtl"
+    "text_direction": "rtl",
+    "default_view_mode": "modern",
+    "default_color_mode": "trope_colors"
   },
   
   "audio": {
+    "enabled": false,
     "default_volume": 0.8,
     "auto_play": false,
     "auto_repeat": false,
     "speed_range": [0.5, 2.0],
     "default_speed": 1.0,
-    "audio_format": "mp3"
+    "audio_format": "mp3",
+    "tradition": "Ashkenazi",
+    "pitch": 0
   },
   
   "calendar": {
     "diaspora_mode": true,
     "show_hebrew_dates": true,
     "highlight_holidays": true,
-    "week_starts_on": "saturday"
+    "week_starts_on": "saturday",
+    "triennial_cycle": false
   },
   
   "practice": {
@@ -38,7 +56,8 @@
     "show_hints": true,
     "immediate_feedback": true,
     "track_progress": true,
-    "daily_goal_minutes": 15
+    "daily_goal_minutes": 15,
+    "default_pronunciation": "Sephardi"
   },
   
   "user": {
@@ -52,13 +71,28 @@
     "data_directory": "assets/data",
     "fonts_directory": "assets/fonts",
     "user_data": "user_data",
-    "database": "database/troptrainer.db"
+    "database": "database/taamimflow.db",
+    "tanach_data": "tanach_data",
+    "sedrot_xml": "sedrot.xml",
+    "tropedef_xml": "tropedef.xml",
+    "tropenames_xml": "tropenames.xml",
+    "custom_sedrot_xml": "custom_sedrot.xml"
   },
   
   "advanced": {
     "debug_mode": false,
-    "log_level": "INFO",
+    "log_level": "WARNING",
     "auto_update": true,
-    "telemetry": false
+    "telemetry": false,
+    "async_loading": true,
+    "cache_enabled": true
+  },
+  
+  "gui": {
+    "window_title": "Ta'amimFlow — Torah Cantillation Trainer",
+    "window_width": 1200,
+    "window_height": 800,
+    "remember_window_size": true,
+    "remember_last_reading": true
   }
 }

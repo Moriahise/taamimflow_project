@@ -501,6 +501,98 @@ def _load_sedrot_xml() -> None:
 _load_sedrot_xml()
 
 
+# ---------------------------------------------------------------------------
+# Megillot melody loader – reads tropedef_megillot.xml
+# ---------------------------------------------------------------------------
+# tropedef_megillot.xml defines the available melody styles per Megilla type.
+# We extract TROPEDEF NAME + TYPE via regex (the file has minor XML issues).
+# Result: {type_str: [melody_name, ...]}
+# e.g. {"Esther": ["Ashkenazic - Binder: No detours", "Ashkenazic - Jacobson", ...], ...}
+
+_MEGILLOT_MELODIES: Dict[str, List[str]] = {}
+
+# Mapping: sedrot.xml reading option name → tropedef TYPE
+_MEGILLA_OPTION_TYPE: Dict[str, str] = {
+    "Megillas Esther":       "Esther",
+    "Shir HaShirim":         "Ruth-Koheles-ShirHashirim",
+    "Megillas Ruth":          "Ruth-Koheles-ShirHashirim",
+    "Koheles/Ecclesiastes":  "Ruth-Koheles-ShirHashirim",
+    "Eichah/Lamentations":   "Eichah",
+}
+
+# Mapping: holiday name → which Megilla option name is the "gateway"
+# (used to append melody variants to holiday Torah lists)
+_HOLIDAY_MEGILLA_OPTION: Dict[str, str] = {
+    "Purim":      "Megillas Esther",
+    "Pesach":     "Shir HaShirim",
+    "Shavuos":    "Megillas Ruth",
+    "Succos":     "Koheles/Ecclesiastes",
+    "Tisha B'Av": "Eichah/Lamentations",
+}
+
+# Standalone Megilla readings in the Holiday tab (left-column buttons)
+_STANDALONE_MEGILLA_TYPE: Dict[str, str] = {
+    "Megillas Esther":                     "Esther",
+    "Megillas Shir HaShirim (Song of Songs)": "Ruth-Koheles-ShirHashirim",
+    "Megillas Ruth":                        "Ruth-Koheles-ShirHashirim",
+    "Megillas Eichah (Lamentations)":       "Eichah",
+    "Megillas Koheles (Ecclesiastes)":      "Ruth-Koheles-ShirHashirim",
+}
+
+
+def _find_megillot_xml() -> str | None:
+    """Search for tropedef_megillot.xml in common locations."""
+    candidates = [
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "tropedef_megillot.xml"),
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "tropedef_megillot.xml"),
+        _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "tropedef_megillot.xml"),
+        "tropedef_megillot.xml",
+        "/mnt/user-data/uploads/tropedef_megillot.xml",
+    ]
+    for path in candidates:
+        if _os.path.isfile(path):
+            return path
+    return None
+
+
+def _load_megillot_xml() -> None:
+    """Parse tropedef_megillot.xml and populate _MEGILLOT_MELODIES.
+
+    Uses regex instead of XML parser because the file contains minor
+    well-formedness issues (missing spaces between attributes).
+    """
+    global _MEGILLOT_MELODIES
+    import re as _re
+    path = _find_megillot_xml()
+    if not path:
+        return
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as _fh:
+            content = _fh.read()
+        pattern = _re.compile(r'<TROPEDEF\s+NAME="([^"]+)"\s+TYPE="([^"]+)"')
+        from collections import defaultdict as _dd
+        melodies: Dict[str, List[str]] = _dd(list)
+        for name, typ in pattern.findall(content):
+            name = name.strip()
+            if name not in melodies[typ]:
+                melodies[typ].append(name)
+        _MEGILLOT_MELODIES.update(melodies)
+    except Exception:
+        pass
+
+
+_load_megillot_xml()
+
+
+def _megilla_melody_options(megilla_type: str) -> List[str]:
+    """Return melody variant names for *megilla_type* from tropedef_megillot.xml.
+
+    Falls back to a single generic entry if the file was not loaded.
+    """
+    variants = _MEGILLOT_MELODIES.get(megilla_type, [])
+    return variants if variants else [megilla_type]
+
+
 def _get_torah_options(parsha: str | None) -> List[str]:
     """Return the list of Torah options for *parsha* from sedrot.xml."""
     if parsha and parsha in _SEDROT_OPTIONS:
@@ -1401,38 +1493,52 @@ class OpenReadingDialog(QDialog):
         self._refresh_option_lists_holiday(holiday)
 
     def _refresh_option_lists_holiday(self, holiday: str) -> None:
-        """Populate Torah, Maftir and Haftarah lists from sedrot.xml for *holiday*.
+        """Populate Torah, Maftir and Haftarah lists for *holiday*.
 
-        The original TropeTrainer shows ALL Torah options (all SPECIAL variants
-        combined) and all Haftarah options for the selected holiday.
+        For regular holidays: all Torah/Maftir/Haftarah options from sedrot.xml.
+        For holidays with an associated Megilla (Purim, Pesach, Shavuos, Succos,
+        Tisha B'Av): the Torah list additionally contains the Megilla's melody
+        variants from tropedef_megillot.xml.
+        For standalone Megilla buttons: only the melody variants are shown.
         """
         self.torah_list.clear()
         self.maftir_list.clear()
         self.haftarah_list.clear()
 
+        # ---- Standalone Megilla buttons (grayed out in right column) ----
+        if holiday in _STANDALONE_MEGILLA_TYPE:
+            megilla_type = _STANDALONE_MEGILLA_TYPE[holiday]
+            for melody in _megilla_melody_options(megilla_type):
+                self.torah_list.addItem(QListWidgetItem(melody))
+            if self.torah_list.count():
+                self.torah_list.setCurrentRow(0)
+            self.open_haftarah_btn.setEnabled(False)
+            return
+
+        # ---- Regular holidays ----
         if holiday not in _SEDROT_OPTIONS:
             self.open_haftarah_btn.setEnabled(False)
             return
 
-        opts = _SEDROT_OPTIONS[holiday]
-
-        # For holidays, we want ALL Torah options (including SPECIAL variants)
-        # as shown in the screenshot (e.g. Rosh Hashanah shows all Day 1/Day 2 variants)
         holiday_torah = list(_get_holiday_torah_options(holiday))
         holiday_maftir = _get_holiday_maftir_options(holiday)
         holiday_haftarah = _get_holiday_haftarah_options(holiday)
 
-        # Pesach, Shavuos and Tisha B'Av have their Megilla not embedded in
-        # sedrot.xml under their own reading – append them manually just as
-        # the original TropeTrainer displays them in the Torah options list.
-        _HOLIDAY_MEGILLA: Dict[str, str] = {
-            "Pesach":     "Shir HaShirim",
-            "Shavuos":    "Megillas Ruth",
-            "Tisha B'Av": "Eichah/Lamentations",
-        }
-        extra = _HOLIDAY_MEGILLA.get(holiday)
-        if extra and extra not in holiday_torah:
-            holiday_torah.append(extra)
+        # For holidays that have an associated Megilla (Purim, Pesach, Shavuos,
+        # Succos, Tisha B'Av): replace the bare Megilla option name with the
+        # full melody variant list from tropedef_megillot.xml.
+        megilla_option = _HOLIDAY_MEGILLA_OPTION.get(holiday)
+        if megilla_option:
+            megilla_type = _MEGILLA_OPTION_TYPE.get(megilla_option, "")
+            melody_variants = _megilla_melody_options(megilla_type) if megilla_type else []
+
+            # Remove the bare option name if present, then append melody variants
+            if megilla_option in holiday_torah:
+                idx = holiday_torah.index(megilla_option)
+                holiday_torah[idx:idx + 1] = melody_variants
+            else:
+                # Not yet in the list (Pesach, Shavuos, Tisha B'Av): append
+                holiday_torah.extend(melody_variants)
 
         for opt in holiday_torah:
             self.torah_list.addItem(QListWidgetItem(opt))
