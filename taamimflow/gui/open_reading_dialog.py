@@ -1860,6 +1860,12 @@ class OpenReadingDialog(QDialog):
 
     def _on_open_haftarah(self) -> None:
         self.reading_type = "Haftarah"
+        # Capture which specific haftarah option the user selected
+        item = self.haftarah_list.currentItem()
+        if item:
+            self.selected_option = item.text().strip()
+        else:
+            self.selected_option = None
         self._accept_selection()
 
     def _accept_selection(self) -> None:
@@ -1878,6 +1884,11 @@ class OpenReadingDialog(QDialog):
             if btn:
                 self.selected_parsha = btn.text()
                 self.selected_book = "Holiday"
+                # For standalone Megilla buttons set the correct reading_type
+                # so main_window can look up the right book and verse numbering.
+                megilla_type = _STANDALONE_MEGILLA_TYPE.get(btn.text())
+                if megilla_type:
+                    self.reading_type = megilla_type
                 self.accept()
         elif tab == 2:  # Custom
             name = self.custom_name_combo.currentText()

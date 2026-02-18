@@ -69,7 +69,7 @@ _RE_PARA_MARKER = re.compile(r"\s*[(\[]\s*[פס]\s*[)\]]")
 _RE_CHAPTER = re.compile(r"^\s*Chapter\s+(\d+)\s*$", re.IGNORECASE)
 # TropeTrainer-style reference: GEN1:1-2:3 or Genesis.1.1-2.3 or Genesis 1:1-2:3
 _RE_TT_REF = re.compile(
-    r"^([A-Z]{2,5})(\d+):(\d+)(?:-(\d+):(\d+))?$", re.IGNORECASE
+    r"^(\d?[A-Z]{2,4})(\d+):(\d+)(?:-(\d+):(\d+))?$", re.IGNORECASE
 )
 _RE_DOT_REF = re.compile(
     r"^([A-Za-z ]+?)\.(\d+)\.(\d+)(?:-(\d+)\.(\d+))?$"

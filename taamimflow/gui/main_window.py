@@ -60,10 +60,11 @@ from PyQt6.QtCore import Qt, QSize, QDate
 from ..config import get_app_config
 from ..connectors import get_default_connector
 from ..connectors.base import BaseConnector
-from .text_widget import ModernTorahTextWidget
+from .text_widget import ModernTorahTextWidget, build_verse_metadata
 from .open_reading_dialog import OpenReadingDialog
 from .notation_widget import TropeNotationPanel
 from ..utils.trope_parser import tokenise, Token, GROUPS, get_trope_group
+from ..utils.sedrot_parser import get_aliyah_boundaries, get_parsha_start, get_book_name_for_reading, get_option_type, get_haftarah_refs, get_maftir_refs
 
 # ── Optional imports with safe fallbacks ──
 # Customize dialog (from V5)
@@ -105,6 +106,7 @@ class MainWindow(QMainWindow):
         # New: track reading‑type, cycle, diaspora from open‑reading dialog
         self.current_cycle: int = 0
         self.current_reading_type: str = "Torah"
+        self.current_holiday_option: str | None = None
         self.current_diaspora: bool = True
         # Load configuration and connector
         config = get_app_config()
@@ -586,6 +588,9 @@ class MainWindow(QMainWindow):
             if hasattr(dialog, "diaspora_radio"):
                 diaspora = dialog.diaspora_radio.isChecked()
 
+            # Capture the specific sub-option chosen (e.g. "Day 8 (Weekday)")
+            holiday_option: str | None = getattr(dialog, "selected_option", None)
+
             self.load_parsha(
                 dialog.selected_parsha,
                 dialog.selected_book or "",
@@ -593,6 +598,7 @@ class MainWindow(QMainWindow):
                 cycle=cycle,
                 date=selected_date,
                 diaspora=diaspora,
+                holiday_option=holiday_option,
             )
 
     def load_parsha(
@@ -604,6 +610,7 @@ class MainWindow(QMainWindow):
         cycle: int = 0,
         date: QDate | None = None,
         diaspora: bool = True,
+        holiday_option: str | None = None,
     ) -> None:
         """Load and display a Torah portion, Haftarah or Maftir reading.
 
@@ -616,6 +623,9 @@ class MainWindow(QMainWindow):
         :param cycle: Triennial cycle (0 = annual, 1–3).
         :param date: The date selected in the dialog.
         :param diaspora: Whether to use the Diaspora calendar.
+        :param holiday_option: For holiday readings, the specific sub-option
+            name chosen by the user (e.g. ``"Day 8 (Weekday)"`` for Pesach).
+            When provided this overrides cycle-based option selection.
         """
         # Store current selection
         self.current_parsha = parsha_name
@@ -623,13 +633,36 @@ class MainWindow(QMainWindow):
         self.current_cycle = cycle
         self.current_reading_type = reading_type
         self.current_diaspora = diaspora
+        self.current_holiday_option = holiday_option  # specific day/service option
 
         # Update titles
-        self.title_label.setText(f"[{parsha_name}]")
+        # For holiday readings show "[Pesach: Day 8 (Weekday)]" in the title bar
+        # to match TropeTrainer's display style.
+        if holiday_option:
+            title_text = f"[{parsha_name}: {holiday_option}]"
+        else:
+            title_text = f"[{parsha_name}]"
+        self.title_label.setText(title_text)
         self.subtitle_label.setText(
             f"{reading_type}" + (f" – Cycle {cycle}" if cycle else "")
         )
-        self.book_label.setText(book_name)
+        # ── Determine the actual book name from sedrot.xml ──────────
+        # For Torah readings use the Torah book (e.g. "Bamidbar/Numbers").
+        # For Haftarah, show the Nevi'im book (e.g. "Jeremiah").
+        # For Megillot, show the Ketuvim book (e.g. "Ruth", "Esther").
+        # Pass holiday_option so we look up the *specific* day's book,
+        # not the first option of the holiday (e.g. Pesach Day 8 → Devarim).
+        try:
+            xml_book = get_book_name_for_reading(
+                parsha_name,
+                cycle=cycle,
+                reading_type=reading_type,
+                option_name=holiday_option,
+            )
+            self.book_label.setText(xml_book if xml_book else book_name)
+        except Exception:
+            self.book_label.setText(book_name)
+
 
         # Convert QDate to Python date for the connector
         py_date: _date | None = None
@@ -644,9 +677,22 @@ class MainWindow(QMainWindow):
         try:
             rt = reading_type.lower()
             if rt == "haftarah":
-                if hasattr(self.connector, "get_haftarah"):
+                # Use sedrot_parser to resolve the correct refs for the specific
+                # option (e.g. "Shabbas Chanukah" vs standard Mikeitz Haftarah).
+                # This ensures holiday_option is honoured at the text-loading stage.
+                refs = get_haftarah_refs(
+                    parsha_name, option_name=holiday_option
+                )
+                if refs and hasattr(self.connector, "get_text"):
+                    parts: list = []
+                    for ref in refs:
+                        try:
+                            parts.append(self.connector.get_text(ref))
+                        except Exception as exc:
+                            logger.warning("Skipping haftarah ref %r: %s", ref, exc)
+                    text = "\n".join(parts)
+                elif hasattr(self.connector, "get_haftarah"):
                     kwargs: Dict = {"cycle": cycle}
-                    # Pass date if the connector supports it
                     sig = inspect.signature(self.connector.get_haftarah)
                     if "for_date" in sig.parameters and py_date:
                         kwargs["for_date"] = py_date
@@ -657,7 +703,20 @@ class MainWindow(QMainWindow):
                     text = self.connector.get_parasha(parsha_name, cycle=cycle)
 
             elif rt == "maftir":
-                if hasattr(self.connector, "get_maftir"):
+                # Same pattern: use sedrot_parser to pick the correct Maftir option
+                # (e.g. "Chanukah Day 6" vs the standard Maftir).
+                maftir_refs = get_maftir_refs(
+                    parsha_name, option_name=holiday_option, cycle=cycle
+                )
+                if maftir_refs and hasattr(self.connector, "get_text"):
+                    parts = []
+                    for ref in maftir_refs:
+                        try:
+                            parts.append(self.connector.get_text(ref))
+                        except Exception as exc:
+                            logger.warning("Skipping maftir ref %r: %s", ref, exc)
+                    text = "\n".join(parts)
+                elif hasattr(self.connector, "get_maftir"):
                     text = self.connector.get_maftir(parsha_name, cycle=cycle)
                 elif hasattr(self.connector, "get_parasha_partial"):
                     text = self.connector.get_parasha_partial(parsha_name, cycle=cycle)
@@ -680,7 +739,17 @@ class MainWindow(QMainWindow):
 
         # ── Tokenise with the real trope parser ──
         tokens = tokenise(text)
-        self.torah_text.set_tokens(tokens)
+
+        # ── Build verse/chapter/aliyah metadata ──
+        # Try to get structured data from the connector first.
+        # Fall back to deriving it from verse_end flags on the tokens.
+        verse_metadata = self._extract_verse_metadata(
+            parsha_name, tokens, reading_type, cycle, holiday_option
+        )
+        if verse_metadata:
+            self.torah_text.set_tokens_with_metadata(tokens, verse_metadata)
+        else:
+            self.torah_text.set_tokens(tokens)
 
         # Generate translation and music notation overview  (V5 method)
         self.update_translation_and_music(tokens)
@@ -699,6 +768,257 @@ class MainWindow(QMainWindow):
             f"View: {self.current_view_mode.title()} | "
             f"Color: {self.current_color_mode.replace('_', ' ').title()}"
         )
+
+    # ------------------------------------------------------------------
+    # Verse / Chapter / Aliyah metadata extraction  (NEW)
+    # ------------------------------------------------------------------
+
+    # Lookup table: parsha name (lowercase, normalised) →
+    #   (book_num, starting_chapter, starting_verse)
+    # book_num: 1=Bereshit, 2=Shemot, 3=Vayikra, 4=Bamidbar, 5=Devarim
+    _PARSHA_START_VERSES: Dict[str, Tuple[int, int, int]] = {
+        # Bereshit
+        "bereshit":              (1,  1,  1),
+        "noach":                 (1,  6,  9),
+        "lech lecha":            (1, 12,  1),
+        "lech-lecha":            (1, 12,  1),
+        "vayera":                (1, 18,  1),
+        "chayei sarah":          (1, 23,  1),
+        "chaye sarah":           (1, 23,  1),
+        "toldot":                (1, 25, 19),
+        "vayetzei":              (1, 28, 10),
+        "vayishlach":            (1, 32,  4),
+        "vayeshev":              (1, 37,  1),
+        "miketz":                (1, 41,  1),
+        "vayigash":              (1, 44, 18),
+        "vayechi":               (1, 47, 28),
+        # Shemot
+        "shemot":                (2,  1,  1),
+        "vaera":                 (2,  6,  2),
+        "bo":                    (2, 10,  1),
+        "beshalach":             (2, 13, 17),
+        "beshalah":              (2, 13, 17),
+        "yitro":                 (2, 18,  1),
+        "mishpatim":             (2, 21,  1),
+        "terumah":               (2, 25,  1),
+        "tetzaveh":              (2, 27, 20),
+        "ki tisa":               (2, 30, 11),
+        "ki tissa":              (2, 30, 11),
+        "vayakhel":              (2, 35,  1),
+        "pekudei":               (2, 38, 21),
+        "vayakhel-pekudei":      (2, 35,  1),
+        # Vayikra
+        "vayikra":               (3,  1,  1),
+        "tzav":                  (3,  6,  1),
+        "shemini":               (3,  9,  1),
+        "tazria":                (3, 12,  1),
+        "metzora":               (3, 14,  1),
+        "tazria-metzora":        (3, 12,  1),
+        "acharei mot":           (3, 16,  1),
+        "acharei":               (3, 16,  1),
+        "kedoshim":              (3, 19,  1),
+        "acharei mot-kedoshim":  (3, 16,  1),
+        "emor":                  (3, 21,  1),
+        "behar":                 (3, 25,  1),
+        "bechukotai":            (3, 26,  3),
+        "behar-bechukotai":      (3, 25,  1),
+        # Bamidbar
+        "bamidbar":              (4,  1,  1),
+        "nasso":                 (4,  4, 21),
+        "behaalotcha":           (4,  8,  1),
+        "beha'alotcha":          (4,  8,  1),
+        "beha'alotecha":         (4,  8,  1),
+        "shelach":               (4, 13,  1),
+        "shelach lecha":         (4, 13,  1),
+        "korach":                (4, 16,  1),
+        "chukat":                (4, 19,  1),
+        "balak":                 (4, 22,  2),
+        "pinchas":               (4, 25, 10),
+        "matot":                 (4, 30,  2),
+        "masei":                 (4, 33,  1),
+        "matot-masei":           (4, 30,  2),
+        # Devarim
+        "devarim":               (5,  1,  1),
+        "vaetchanan":            (5,  3, 23),
+        "ekev":                  (5,  7, 12),
+        "reeh":                  (5, 11, 26),
+        "shoftim":               (5, 16, 18),
+        "ki tetze":              (5, 21, 10),
+        "ki tavo":               (5, 26,  1),
+        "ki savo":               (5, 26,  1),
+        "nitzavim":              (5, 29,  9),
+        "vayelech":              (5, 31,  1),
+        "nitzavim-vayelech":     (5, 29,  9),
+        "haazinu":               (5, 32,  1),
+        "vezot haberachah":      (5, 33,  1),
+        "vezot habracha":        (5, 33,  1),
+        "vezot habracha":        (5, 33,  1),
+    }
+
+    @classmethod
+    def _lookup_parsha_start(
+        cls, parsha_name: str
+    ) -> Optional[Tuple[int, int, int]]:
+        """Look up (book_num, chapter, verse) for a parsha name.
+
+        Normalises the name and strips common TropeTrainer suffixes
+        like ``": Shabbas"`` or ``": Weekday"``.
+
+        :return: ``(book_num, chapter, verse)`` or ``None``.
+        """
+        key = " ".join(parsha_name.lower().split())
+        for suffix in (
+            ": shabbas", ": weekday", ": shabbat", ": holiday",
+            " shabbas", " weekday", " shabbat", " holiday",
+        ):
+            if key.endswith(suffix):
+                key = key[: -len(suffix)].strip()
+                break
+        result = cls._PARSHA_START_VERSES.get(key)
+        if result:
+            return result
+        first_word = key.split()[0] if key else ""
+        return cls._PARSHA_START_VERSES.get(first_word)
+
+    def _extract_verse_metadata(
+        self,
+        parsha_name: str,
+        tokens: List[Token],
+        reading_type: str,
+        cycle: int,
+        holiday_option: str | None = None,
+    ) -> List[dict]:
+        """Derive per-token verse/chapter/aliyah metadata.
+
+        Strategy order:
+
+        0. **sedrot.xml** (primary) – exact aliyah (chapter, verse) start
+           points read directly from the bundled ``sedrot.xml`` data file.
+           When *holiday_option* is supplied the exact named sub-option is
+           used (e.g. "Day 8 (Weekday)" within Pesach).
+        1. Connector ``get_structured_parasha`` if available.
+        2. Connector ``get_verse_ranges`` if available.
+        3. Built-in parsha lookup table (starting chapter/verse only).
+        4. Absolute fallback – chapter 1, verse 1, equal-length aliyot.
+        """
+        if not tokens:
+            return []
+
+        # Helper: build even aliyah boundaries (legacy int-keyed format)
+        def _even_aliyah_boundaries(total_v: int, n_aliyot: int) -> Dict:
+            names_map = {
+                1: "Rishon", 2: "Sheni", 3: "Shlishi",
+                4: "Revi'i", 5: "Chamishi", 6: "Shishi",
+                7: "Shevi'i", 8: "Maftir",
+            }
+            size = max(1, total_v // n_aliyot)
+            return {
+                i * size: (i + 1, names_map.get(i + 1, f"Aliyah {i+1}"))
+                for i in range(n_aliyot)
+            }
+
+        total_verses = max(1, sum(1 for t in tokens if t.verse_end))
+        num_aliyot = 7 if reading_type.lower() == "torah" else 1
+
+        # ── Strategy 0: sedrot.xml ─────────────────────────────────────
+        # Ask the sedrot_parser for exact (chapter, verse) aliyah starts.
+        # Pass holiday_option so that e.g. "Day 8 (Weekday)" within Pesach
+        # is looked up directly instead of defaulting to the first option.
+        # Also pass reading_type so Haftarah/Megilla get their own books.
+        try:
+            # For Maftir reuse the Torah option; for everything else verbatim.
+            xml_rt = reading_type if reading_type.lower() != "maftir" else "Torah"
+            xml_boundaries = get_aliyah_boundaries(
+                parsha_name,
+                cycle=cycle,
+                reading_type=xml_rt,
+                option_name=holiday_option,
+            )
+            if xml_boundaries:
+                start_info = get_parsha_start(
+                    parsha_name,
+                    cycle=cycle,
+                    reading_type=xml_rt,
+                    option_name=holiday_option,
+                )
+                if start_info:
+                    book_num, s_chapter, s_verse = start_info
+                else:
+                    tbl = self._lookup_parsha_start(parsha_name)
+                    if tbl:
+                        book_num, s_chapter, s_verse = tbl
+                    else:
+                        book_num, s_chapter, s_verse = 0, 1, 1
+
+                return build_verse_metadata(
+                    tokens,
+                    starting_chapter=s_chapter,
+                    starting_verse=s_verse,
+                    aliyah_boundaries=xml_boundaries,  # (ch,v)-keyed
+                    book_num=book_num,
+                )
+        except Exception:
+            pass
+
+        # ── Strategy 1: connector supplies structured data ──
+        try:
+            if hasattr(self.connector, "get_structured_parasha"):
+                data = self.connector.get_structured_parasha(
+                    parsha_name, cycle=cycle
+                )
+                if data and isinstance(data, dict):
+                    start = self._lookup_parsha_start(parsha_name)
+                    bk = start[0] if start else 0
+                    return build_verse_metadata(
+                        tokens,
+                        starting_chapter=data.get("starting_chapter", 1),
+                        starting_verse=data.get("starting_verse", 1),
+                        aliyah_boundaries=data.get("aliyah_boundaries") or
+                            _even_aliyah_boundaries(total_verses, num_aliyot),
+                        book_num=bk,
+                    )
+        except Exception:
+            pass
+
+        # ── Strategy 2: connector supplies verse-range data ──
+        try:
+            if hasattr(self.connector, "get_verse_ranges"):
+                ranges = self.connector.get_verse_ranges(parsha_name, cycle=cycle)
+                if ranges and isinstance(ranges, dict):
+                    start = self._lookup_parsha_start(parsha_name)
+                    bk = start[0] if start else 0
+                    return build_verse_metadata(
+                        tokens,
+                        starting_chapter=ranges.get("chapter", 1),
+                        starting_verse=ranges.get("verse", 1),
+                        aliyah_boundaries=ranges.get("aliyah_boundaries") or
+                            _even_aliyah_boundaries(total_verses, num_aliyot),
+                        book_num=bk,
+                    )
+        except Exception:
+            pass
+
+        # ── Strategy 3: built-in parsha lookup table ──
+        start = self._lookup_parsha_start(parsha_name)
+        if start is not None:
+            book_num, s_chapter, s_verse = start
+            return build_verse_metadata(
+                tokens,
+                starting_chapter=s_chapter,
+                starting_verse=s_verse,
+                aliyah_boundaries=_even_aliyah_boundaries(total_verses, num_aliyot),
+                book_num=book_num,
+            )
+
+        # ── Strategy 4: absolute fallback ──
+        return build_verse_metadata(
+            tokens,
+            starting_chapter=1,
+            starting_verse=1,
+            aliyah_boundaries=_even_aliyah_boundaries(total_verses, num_aliyot),
+            book_num=0,
+        )
+
 
     def set_view_mode(self, mode: str) -> None:
         """Set the view mode and update the display and toggle states."""
