@@ -2,39 +2,16 @@
 Modernised Audio Utility Module
 ===============================
 
-This module provides a high‑level audio interface for TaamimFlow’s
-simplified GUI.  Earlier versions of this module were skeletal
-placeholders that simply slept for the duration of the requested
-notes and raised ``NotImplementedError`` when asked to play a file,
-causing the application to freeze without producing any sound.  The
-current version delegates synthesis and playback to the robust
-engine in :mod:`taamimflow.audio.audio_engine`, which synthesises
-PCM audio from notes and plays it via QtMultimedia.  There are
-no dependencies on pydub or external media players for note
-playback.
+High-level audio interface for Ta'amimFlow's simplified GUI.
+Delegates synthesis and playback to the robust Qt6-compatible engine in
+:mod:`taamimflow.audio.audio_engine`.  No pydub or external media
+players are required for note playback – only ``PyQt6``.
 
 Key features:
 
-* **Real sound generation** using sine‑wave synthesis.  Each note in the
-  provided sequence is converted into a :class:`~taamimflow.audio.audio_engine.Note`
-  and synthesised into raw PCM data at the requested tempo and volume.
-* **Non‑blocking playback** courtesy of the underlying engine.  While
-  this class itself does not manage threads, the calling GUI should
-  invoke playback on a worker thread as already implemented in the
-  full ``main_window``.  Playback uses QtMultimedia and does not
-  block the GUI.
-* **File playback** is still supported via pydub when available;
-  otherwise the file is opened with the operating system’s default
-  media handler.  This functionality is optional and separate from
-  note synthesis.
-
-With these improvements the simplified GUI can now produce audible
-feedback without requiring the user to install external audio
-back‑ends (``simpleaudio``, ``pygame``, ``ffplay``, etc.).  The only
-requirement for note playback is ``PyQt6``; if it is unavailable
-the module still returns synthesised PCM data but does not play
-sound.
-
+* **Real sound generation** via sine-wave synthesis.
+* **Non-blocking playback** via ``QAudioSink`` (Qt6).
+* **File playback** via pydub when available; OS default handler otherwise.
 """
 
 from __future__ import annotations
@@ -51,85 +28,68 @@ except Exception:
     HAVE_PYDUB = False
     AudioSegment = None  # type: ignore
 
-# Import the robust sine‑wave engine and Note class from the core audio module.
+# Import the Qt6-compatible sine-wave engine and Note class.
 from ..audio.audio_engine import AudioEngine as _SineEngine, Note
 
 
 class AudioEngine:
-    """High‑level audio engine for simplified GUIs.
+    """High-level audio engine for simplified GUIs.
 
-    This class wraps the core :class:`~taamimflow.audio.audio_engine.AudioEngine` to
-    provide convenient methods for playing sequences of notes or
-    pre‑recorded audio files.  It performs no initialisation of audio
-    devices itself; all heavy lifting is delegated to the underlying
-    engine.  The calling code is responsible for invoking playback on
-    a background thread if necessary to avoid blocking the GUI.
+    Wraps :class:`~taamimflow.audio.audio_engine.AudioEngine` to provide
+    convenient methods for playing note sequences or pre-recorded files.
+    Synthesis and playback work without pydub; only ``PyQt6`` is required.
     """
 
     def __init__(self) -> None:
-        # Underlying engine used for synthesis and playback
         self._engine = _SineEngine()
 
     def initialise(self) -> None:
-        """Perform any deferred setup required for playback.
-
-        The underlying engine performs no initialisation, so this
-        method exists for API compatibility and does nothing.
-        """
-        # No explicit initialisation required; kept for backward compatibility.
+        """Deferred setup – kept for API compatibility, does nothing."""
         pass
 
-    def play_notes(self, notes: Iterable[Tuple[str, float]], tempo: float = 120.0, volume: float = 0.8) -> None:
-        """Synthesize and play a sequence of notes.
+    def play_notes(
+        self,
+        notes: Iterable[Tuple[str, float]],
+        tempo: float = 120.0,
+        volume: float = 0.8,
+    ) -> None:
+        """Synthesise and play a sequence of notes.
 
-        :param notes: Iterable of tuples ``(pitch, duration)``.  Pitch can
-            be a MIDI number or note name (e.g. "C4"), duration is in
-            beats relative to a quarter note.  Durations are interpreted
-            according to the given tempo.
-        :param tempo: Tempo in beats per minute.  Defaults to 120 BPM.
-        :param volume: Volume level from 0.0 to 1.0.  Defaults to 0.8.
+        :param notes: Iterable of ``(pitch, duration)`` tuples.  Pitch can
+            be a MIDI number or note name (e.g. "C4"); duration is in
+            quarter-note beats relative to *tempo*.
+        :param tempo: Tempo in BPM.  Defaults to 120 BPM.
+        :param volume: Volume 0.0–1.0.  Defaults to 0.8.
 
-        The sequence is converted into :class:`Note` instances and
-        synthesised via the underlying engine.  Playback is delegated
-        to that engine’s :meth:`play` method which handles multiple
-        fallbacks.  Errors during synthesis or playback are suppressed
-        to prevent UI freezes.
+        Converts input tuples into :class:`Note` instances and synthesises
+        via the underlying engine.  Errors are suppressed to keep the UI
+        responsive.
         """
-        # Convert input tuples into Note objects
         note_objs: List[Note] = []
         for pitch, duration in notes:
             note_objs.append(Note(pitch, duration))
         try:
-            seg = self._engine.synthesise(note_objs, tempo=tempo, volume=volume)
-            # ``play`` will silently return if seg is None or audio backend is missing
-            self._engine.play(seg)
+            pcm = self._engine.synthesise(note_objs, tempo=tempo, volume=volume)
+            # play() accepts QByteArray, bytes, or AudioSegment – all handled
+            self._engine.play(pcm)
         except Exception:
-            # If anything goes wrong (e.g. invalid pitch, missing pydub), we
-            # simply return without raising.  The GUI should remain responsive.
             return
 
     def play_audio_file(self, path: str) -> None:
-        """Play a pre‑recorded audio file.
+        """Play a pre-recorded audio file.
 
-        :param path: Filesystem path to the audio file.  Supported formats
-            depend on pydub’s decoders (typically WAV, MP3, etc.).
-
-        Attempts to load the file via pydub and play it using the
-        underlying engine.  If pydub is not available or the file
-        cannot be decoded, the method falls back to launching the
-        operating system’s default media player.  All exceptions are
-        suppressed.
+        Attempts to load via pydub and play through the underlying engine.
+        Falls back to the OS default media player if pydub is unavailable
+        or the file cannot be decoded.
         """
         try:
             if HAVE_PYDUB:
-                # Try to decode with pydub
                 seg = AudioSegment.from_file(path)  # type: ignore
                 self._engine.play(seg)
                 return
         except Exception:
-            # Fall back to OS handler below
             pass
-        # Fallback: open the file with the system default application
+        # Fallback: open with system default application
         try:
             if sys.platform == 'win32':
                 os.startfile(path)  # type: ignore[attr-defined]
@@ -138,5 +98,4 @@ class AudioEngine:
             else:
                 subprocess.Popen(['xdg-open', path])
         except Exception:
-            # Last resort: do nothing on failure
             return
