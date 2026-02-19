@@ -1,89 +1,129 @@
 """
-Milestone 10 – Audio‑Engine für Trope‑Sequenzen
-===============================================
+Robuste AudioEngine ohne externe Abhängigkeiten
+=================================================
 
-Diese Komponente stellt eine minimal funktionsfähige Audio‑Engine
-bereit, um die aus den Tropendefinitionen gewonnenen
-Notensequenzen hörbar zu machen. Der Fokus liegt auf einer
-softwarebasierten Synthese, die ohne externe Abhängigkeiten wie
-FluidSynth auskommt. Stattdessen wird, wenn verfügbar, das
-``pydub``‑Paket genutzt, um einfache Sinus‑Wellen zu erzeugen und
-zu einem Audiostream zu kombinieren. Sollte ``pydub`` nicht
-installiert sein, liefert die Engine keine Audiodaten.
+Diese AudioEngine implementiert die grundlegende Synthese und Wiedergabe
+für Ta'amimFlow, ohne sich auf externe Player wie pydub.playback,
+winsound oder ffmpeg zu verlassen.  Sie nutzt ausschließlich
+QtMultimedia, um rohe PCM‑Daten abzuspielen.  Damit wird eine
+nicht‑blockierende Wiedergabe ermöglicht, die im GUI‑Kontext von
+PyQt6 sicher funktioniert.
 
-Die Pitch‑Angabe der Noten kann entweder als MIDI‑Zahl (0–127) oder
-als String in der Form "A4", "C#5" etc. vorliegen. Die
-Dauern werden als Faktor relativer Viertelnoten interpretiert; bei
-einem Tempo von 120 BPM entspricht eine Einheit 0,5 Sekunden.
+Die Engine bietet drei Hauptfunktionen:
 
-Beispiel:
+* ``synthesise`` generiert aus einer Folge von ``Note``‑Objekten
+  einen ``QByteArray`` mit 16‑bit‑PCM‑Samples (Mono, 44.1 kHz).
+* ``play`` spielt entweder einen ``QByteArray``, ein ``bytes``
+  Objekt oder einen ``pydub.AudioSegment`` ab.  Letzteres wird zur
+  Laufzeit konvertiert.
+* ``generate_audio_segment`` wandelt eine Notensequenz in einen
+  ``pydub.AudioSegment`` um.  Dies dient primär der Kompatibilität zu
+  Modulen wie ``ConcatAudioEngine``, die weiterhin Pydub zur
+  Bearbeitung (z.B. Crossfades) nutzen.  Fehlt ``pydub``, liefert
+  diese Methode ``None``.
 
-    from audio_engine import AudioEngine
-    notes = [Note(pitch="C4", duration=1.0), Note(pitch="D4", duration=0.5)]
-    engine = AudioEngine()
-    segment = engine.generate_audio_segment(notes, tempo=100)
-    engine.save_audio_segment(segment, "trope.wav")
+Die Klasse ``Note`` ist identisch mit der Definition im ursprünglichen
+Projekt: ``pitch`` kann als MIDI‑Zahl (int) oder als Notenbezeichner
+``"A4"`` usw. übergeben werden, ``duration`` ist als Anzahl
+Viertelnoten definiert.  Ein optionales ``upbeat``‑Flag wird zur
+Vollständigkeit mitgeführt, ohne die Synthese zu beeinflussen.
 
+Diese Implementierung geht davon aus, dass ein Qt‑Kontext vorhanden
+ist (d.h. ``PyQt6`` ist installiert).  Wenn ``PyQt6`` nicht
+verfügbar ist, ist keine Audioausgabe möglich.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Union
-
 import math
+from dataclasses import dataclass
+from typing import Iterable, Optional, Union
 
+# QtMultimedia für Audioausgabe
+try:
+    from PyQt6.QtMultimedia import QAudioFormat, QAudioOutput, QAudioDevice
+    from PyQt6.QtCore import QBuffer, QIODevice, QByteArray
+    HAVE_QT = True
+except Exception:
+    # Dummy Klassen für Typing, wenn Qt fehlt
+    QAudioFormat = object  # type: ignore
+    QAudioOutput = object  # type: ignore
+    QAudioDevice = object  # type: ignore
+    QBuffer = object  # type: ignore
+    QIODevice = object  # type: ignore
+    QByteArray = bytes  # type: ignore
+    HAVE_QT = False
+
+# Optionales Pydub für die Erzeugung von AudioSegment
 try:
     from pydub import AudioSegment  # type: ignore
-    from pydub.generators import Sine  # type: ignore
     HAVE_PYDUB = True
 except Exception:
-    HAVE_PYDUB = False
     AudioSegment = None  # type: ignore
-    Sine = None  # type: ignore
+    HAVE_PYDUB = False
 
 
 @dataclass
 class Note:
-    """Repräsentation einer musikalischen Note.
+    """Repräsentiert eine einzelne Note für die Synthese.
 
-    :param pitch: Pitch als MIDI‑Zahl oder Note (z.B. "A4", "C#5").
-    :param duration: Notenlänge relativ zu einer Viertelnote (1.0 = Viertelnote,
-                      0.5 = Achtel, 2.0 = Halbe etc.).
-    :param upbeat: Optional: True, wenn es sich um ein Auftaktzeichen handelt.
+    :param pitch: MIDI‑Zahl (int) oder Notation wie ``"A4"``
+    :param duration: Dauer in Viertelnoten (1.0 = Viertelnote)
+    :param upbeat: Optionales Auftakt‑Flag (derzeit nicht verwendet)
     """
+
     pitch: Union[str, int]
     duration: float
     upbeat: bool = False
 
 
 class AudioEngine:
-    """Einfache Audio‑Engine auf Basis von Sinus‑Generatoren.
+    """AudioEngine mit interner Sinus‑Synthese und Qt‑Wiedergabe.
 
-    Diese Engine ist nicht für den produktiven Einsatz gedacht, erfüllt aber
-    die MVP‑Anforderung, Notensequenzen als Audiodaten auszugeben. Sie
-    ist unabhängig von der restlichen Anwendung und erzeugt
-    AudioSegment‑Objekte (wenn ``pydub`` installiert ist).
+    Diese Engine erzeugt Roh‑PCM‑Daten (16 bit, Mono, 44.1 kHz) aus
+    Notensequenzen und spielt diese mit ``QAudioOutput`` ab.  Es gibt
+    keine Abhängigkeiten zu externen Playern oder Blocking‑Calls wie
+    ``time.sleep``.  Bei fehlendem Qt (``HAVE_QT = False``) können
+    zwar PCM‑Bytes erzeugt werden, aber keine Wiedergabe erfolgen.
     """
+
     def __init__(self) -> None:
-        if not HAVE_PYDUB:
-            # Warnung: In diesem Minimal‑Setup können wir keine Audiodaten erzeugen
-            pass
+        # Standardformat definieren (Mono, 44.1 kHz, 16 bit)
+        self._sample_rate = 44100
+        if HAVE_QT:
+            fmt = QAudioFormat()
+            fmt.setChannelCount(1)
+            fmt.setSampleRate(self._sample_rate)
+            fmt.setSampleSize(16)
+            fmt.setSampleType(QAudioFormat.SampleType.SignedInt)
+            fmt.setCodec("audio/pcm")
+            # Standard‑Ausgabegerät wählen
+            device = QAudioDevice.defaultAudioOutput()
+            self._audio_out: QAudioOutput = QAudioOutput(device, fmt)  # type: ignore
+            self._buffer: Optional[QBuffer] = None
+            self._format = fmt
+        else:
+            self._audio_out = None  # type: ignore
+            self._buffer = None
+            self._format = None  # type: ignore
 
+    # ------------------------------------------------------------------
+    # Hilfsfunktionen
+    # ------------------------------------------------------------------
     def pitch_to_frequency(self, pitch: Union[str, int]) -> float:
-        """Konvertiere eine Pitch‑Angabe in Hertz.
+        """Konvertiere Pitch in eine Frequenz in Hz.
 
-        Unterstützt wird entweder eine MIDI‑Zahl (int) oder eine
-        Notenbezeichnung wie "C4", "G#3". Unbekannte Formate führen
-        zu einer Standardfrequenz von 440 Hz.
+        Akzeptiert MIDI‑Zahlen (int oder String) oder Notenbezeichner
+        wie "A4", "C#5".  Bei unbekannten Formaten wird 440 Hz
+        (Kammerton A) verwendet.
         """
-        # MIDI‑Notation
+        # MIDI‑Zahl direkt
         if isinstance(pitch, int) or (isinstance(pitch, str) and pitch.isdigit()):
             midi = int(pitch)
             return 440.0 * (2.0 ** ((midi - 69) / 12.0))
+        # Notation wie A4, C#3 etc.
         if isinstance(pitch, str):
             p = pitch.strip().upper()
-            # Ermittle Note und Oktave
             note_map = {
                 'C': 0, 'C#': 1, 'DB': 1,
                 'D': 2, 'D#': 3, 'EB': 3,
@@ -93,190 +133,139 @@ class AudioEngine:
                 'A': 9, 'A#': 10, 'BB': 10,
                 'B': 11,
             }
-            # Extrahiere Oktave (letzte Ziffern) und Notenname
+            # Trenne Note und Oktave
             idx = 0
             while idx < len(p) and not p[idx].isdigit():
                 idx += 1
-            note_name = p[:idx]
-            octave_str = p[idx:] if idx < len(p) else '4'
-            try:
-                octave = int(octave_str)
-            except ValueError:
-                octave = 4
-            semi = note_map.get(note_name, None)
-            if semi is None:
-                return 440.0
+            note = p[:idx]
+            octave = int(p[idx:]) if idx < len(p) else 4
+            semi = note_map.get(note, 0)
             midi = 12 * (octave + 1) + semi
             return 440.0 * (2.0 ** ((midi - 69) / 12.0))
+        # Fallback
         return 440.0
 
-    def generate_audio_segment(self, notes: Iterable[Note], tempo: float = 120.0) -> Optional['AudioSegment']:
-        """Erzeuge ein pydub.AudioSegment für eine Sequenz von Noten.
-
-        :param notes: Iterable von ``Note``‑Objekten.
-        :param tempo: Tempo in BPM; bestimmt die Länge einer Viertelnote.
-        :return: Ein kombiniertes AudioSegment oder ``None``, falls ``pydub``
-            nicht verfügbar ist.
-        """
-        if not HAVE_PYDUB:
-            return None
-        if not notes:
-            return AudioSegment.silent(duration=0)  # type: ignore
-        beat_ms = 60000.0 / tempo  # Dauer einer Viertelnote in Millisekunden
-        segments: List['AudioSegment'] = []
-        for note in notes:
-            freq = self.pitch_to_frequency(note.pitch)
-            dur_ms = int(note.duration * beat_ms)
-            dur_ms = max(1, dur_ms)  # min 1 ms
-            tone = Sine(freq).to_audio_segment(duration=dur_ms).apply_gain(-3)
-            segments.append(tone)
-        # Füge Noten hintereinander (kein zusätzlicher Silence)
-        output = segments[0]
-        for seg in segments[1:]:
-            output += seg
-        return output
-
-    # ── Methoden für main_window/_WordByWordWorker ────────────────────────────
-
+    # ------------------------------------------------------------------
+    # Synthese
+    # ------------------------------------------------------------------
     def synthesise(
         self,
         notes: Iterable[Note],
         tempo: float = 120.0,
         volume: float = 1.0,
+    ) -> Optional[QByteArray]:
+        """Erzeuge PCM‑Audio als ``QByteArray`` für eine Notensequenz.
+
+        :param notes: Iterable von ``Note``
+        :param tempo: Tempo in BPM (1.0 Viertelnote = 60/tempo Sekunden)
+        :param volume: Lautstärke (0.0–1.0)
+        :return: Rohbytes als ``QByteArray`` oder ``None`` wenn keine
+          Noten angegeben wurden.
+        """
+        # Keine Noten → nichts zu tun
+        has_notes = False
+        # Dauer einer Viertelnote
+        beat_sec = 60.0 / tempo
+        max_amp = 32767 * max(min(volume, 1.0), 0.0)
+        sample_rate = self._sample_rate
+        pcm = bytearray()
+        for note in notes:
+            has_notes = True
+            freq = self.pitch_to_frequency(note.pitch)
+            dur_sec = note.duration * beat_sec
+            n_samples = max(1, int(dur_sec * sample_rate))
+            # Synthese einfacher Sinus (keine Hüllkurve)
+            for i in range(n_samples):
+                t = i / sample_rate
+                value = int(max_amp * math.sin(2 * math.pi * freq * t))
+                pcm += value.to_bytes(2, byteorder='little', signed=True)
+        if not has_notes:
+            return None
+        # Rückgabe als QByteArray
+        return QByteArray(pcm) if HAVE_QT else QByteArray(bytes(pcm))  # type: ignore
+
+    def generate_audio_segment(
+        self,
+        notes: Iterable[Note],
+        tempo: float = 120.0,
+        volume: float = 1.0,
     ) -> Optional['AudioSegment']:
-        """Erzeuge AudioSegment für die gegebenen Noten.
+        """Erzeuge einen ``pydub.AudioSegment`` aus Noten.
 
-        Alias/Erweiterung von :meth:`generate_audio_segment`, der zusätzlich
-        die Lautstärke (0–1) berücksichtigt.  Wird von
-        ``_WordByWordWorker`` und ``_AudioWorker`` in main_window aufgerufen.
-
-        :param notes: Iterable von :class:`Note`-Objekten.
-        :param tempo:  Tempo in BPM (Standard: 120).
-        :param volume: Lautstärke 0.0–1.0 (0 = Stille, 1 = Volle Lautstärke).
-        :return:       pydub.AudioSegment oder ``None`` wenn pydub fehlt.
+        Diese Methode dient ausschließlich der Abwärtskompatibilität für
+        Module wie ``ConcatAudioEngine``, die weiterhin auf ``pydub``
+        angewiesen sein können (z.B. um Crossfades auszuführen).
+        Ist ``pydub`` nicht vorhanden, liefert sie ``None``.
         """
         if not HAVE_PYDUB:
             return None
-        seg = self.generate_audio_segment(list(notes), tempo)
-        if seg is None:
+        qba = self.synthesise(notes, tempo=tempo, volume=volume)
+        if qba is None:
             return None
-        # Lautstärke in dB umrechnen: 0 dB = vol 1.0, -∞ = vol 0
-        if volume <= 0:
-            gain_db = -60.0
-        elif volume < 1.0:
-            import math as _math
-            gain_db = 20.0 * _math.log10(volume)
-        else:
-            gain_db = 0.0
-        return seg.apply_gain(gain_db)
-
-    def play(self, segment: Optional['AudioSegment']) -> None:
-        """Spiele ein AudioSegment ab.  Blockierend (läuft im Worker-Thread).
-
-        Wiedergabe-Kette (Windows):
-          1. pydub.playback.play()     – wenn simpleaudio/pyaudio installiert
-          2. winsound.PlaySound()      – immer auf Windows verfügbar (kein Dep.)
-          3. ffplay-Subprocess         – wenn ffmpeg im PATH
-          4. os.startfile()            – letzter Ausweg (System-Mediaplayer)
-
-        Auf Nicht-Windows-Systemen: pydub.playback → ffplay.
-        """
-        if segment is None or not HAVE_PYDUB:
-            return
-
-        import sys
-        import io
-        import os
-        import tempfile
-
-        # ── 1. pydub.playback (simpleaudio / pyaudio) ─────────────────────
+        # ``bytes(qba)`` erzeugt einen immutable bytes‑Container aus
+        # QByteArray.  pydub benötigt zudem Parameter: sample_width,
+        # frame_rate, channels.
+        data_bytes = bytes(qba)
         try:
-            from pydub.playback import play as _pydub_play
-            _pydub_play(segment)
-            return
-        except Exception:
-            pass
-
-        # WAV-Bytes einmal erzeugen (für Fallbacks 2–4)
-        buf = io.BytesIO()
-        segment.export(buf, format="wav")
-        wav_bytes = buf.getvalue()
-
-        # ── 2. winsound (Windows, built-in, kein simpleaudio nötig) ──────
-        if sys.platform == "win32":
-            try:
-                import winsound
-                winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
-                return
-            except Exception:
-                pass
-
-        # ── 3. ffplay Subprocess (plattformübergreifend mit ffmpeg) ──────
-        try:
-            import subprocess
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(wav_bytes)
-                tmp_path = tmp.name
-            subprocess.run(
-                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp_path],
-                check=True,
-                timeout=30,
+            return AudioSegment(
+                data=data_bytes,
+                sample_width=2,
+                frame_rate=self._sample_rate,
+                channels=1,
             )
-            os.unlink(tmp_path)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Wiedergabe
+    # ------------------------------------------------------------------
+    def _play_bytes(self, raw: bytes) -> None:
+        """Spiele rohe PCM‑Bytes via ``QAudioOutput`` ab (nicht‑blockierend)."""
+        if not HAVE_QT or not raw:
             return
-        except Exception:
+        # Erzeuge ByteArray aus Rohbytes
+        data = QByteArray(raw)
+        # Speichere Buffer auf Instanz, damit er im Speicher bleibt
+        self._buffer = QBuffer()
+        self._buffer.setData(data)
+        # Öffnen im ReadOnly‑Modus
+        self._buffer.open(QIODevice.OpenModeFlag.ReadOnly)  # type: ignore
+        # Abspielen starten
+        self._audio_out.start(self._buffer)
+
+    def play(self, data: Optional[Union[QByteArray, bytes, 'AudioSegment']]) -> None:
+        """Spiele PCM‑Daten oder ``AudioSegment`` ab.
+
+        Diese Methode akzeptiert unterschiedliche Datentypen:
+
+        * ``QByteArray`` oder ``bytes``: Diese werden direkt an
+          ``QAudioOutput`` übergeben.
+        * ``pydub.AudioSegment``: Das Segment wird auf das Format
+          (16 bit, 44.1 kHz, Mono) normiert und dann abgespielt.
+
+        Bei fehlendem Qt oder ungültigen Daten geschieht nichts.  Die
+        Wiedergabe läuft nicht‑blockierend.
+        """
+        if data is None:
+            return
+        # AudioSegment → PCM wandeln
+        if HAVE_PYDUB and isinstance(data, AudioSegment):
             try:
-                os.unlink(tmp_path)
+                seg = data.set_frame_rate(self._sample_rate).set_channels(1).set_sample_width(2)
+                pcm = seg.raw_data  # type: ignore
+                self._play_bytes(pcm)
             except Exception:
-                pass
+                return
+            return
+        # QByteArray → bytes
+        if HAVE_QT and isinstance(data, QByteArray):  # type: ignore
+            self._play_bytes(bytes(data))
+            return
+        # bytes oder bytearray direkt
+        if isinstance(data, (bytes, bytearray)):
+            self._play_bytes(bytes(data))
+            return
+        # Andere Typen ignorieren
+        return
 
-        # ── 4. os.startfile() / xdg-open (letzter Ausweg) ────────────────
-        try:
-            import time
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(wav_bytes)
-                tmp_path = tmp.name
-            if sys.platform == "win32":
-                os.startfile(tmp_path)
-            else:
-                import subprocess
-                subprocess.Popen(["xdg-open", tmp_path])
-            # Kurz warten damit das Wort-Timing ungefähr stimmt
-            time.sleep(len(segment) / 1000.0)
-        except Exception:
-            pass
-
-    def save_audio_segment(self, segment: 'AudioSegment', filename: str, format: str = 'wav') -> None:
-        """Speichere ein AudioSegment in eine Datei.
-
-        :param segment: Das zu speichernde Segment.
-        :param filename: Zielpfad inkl. Endung (z.B. .wav).
-        :param format: Exportformat (wav, mp3, etc.).
-        """
-        if not HAVE_PYDUB or segment is None:
-            raise RuntimeError("AudioSegment ist nicht verfügbar – pydub fehlt.")
-        segment.export(filename, format=format)
-
-    def sequence_to_audio(self, token_list: Iterable[Union[Note, 'TokenFull']], filename: str, tempo: float = 120.0) -> None:
-        """Konvertiere eine Liste von Notes oder TokenFull in eine Audiodatei.
-
-        Wenn ``TokenFull`` übergeben werden, wird die ``notes``‑Liste pro Token
-        verwendet und alle Noten der Reihe nach abgespielt. Leere Noten
-        (None) werden übersprungen.
-        """
-        # Lazy import, um zirkuläre Abhängigkeiten zu vermeiden
-        from milestone9_plus import TokenFull as _TokenFull  # type: ignore
-        combined_notes: List[Note] = []
-        for item in token_list:
-            if isinstance(item, _TokenFull):
-                if item.notes:
-                    combined_notes.extend(item.notes)
-            elif isinstance(item, Note):
-                combined_notes.append(item)
-        segment = self.generate_audio_segment(combined_notes, tempo)
-        if segment is None:
-            raise RuntimeError("Konnte Audio nicht generieren – pydub fehlt.")
-        self.save_audio_segment(segment, filename)
-
-
-__all__ = ["Note", "AudioEngine", "HAVE_PYDUB"]
+__all__ = ["Note", "AudioEngine"]

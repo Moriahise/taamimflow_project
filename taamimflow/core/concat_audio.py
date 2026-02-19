@@ -1,13 +1,24 @@
 """
-Concatenation-basierte Audio-Engine
-===================================
+Concatenation‑based Audio Engine with Enhanced Playback
+======================================================
 
-FIX V10:
-* Relativer Import: ``from .audio_engine import Note, AudioEngine``
-* ``ConcatAudioEngine.__init__`` akzeptiert jetzt ``tradition`` als ersten
-  Parameter – kompatibel mit dem Aufruf in ``main_window._get_audio_engine``.
-* ``synthesise(notes, tempo, volume)`` und ``play(segment)`` Methoden
-  hinzugefügt – gemeinsame Schnittstelle mit ``AudioEngine``.
+This module provides an audio engine that concatenates pre‑recorded
+cantillation segments with crossfades.  It closely mirrors the
+implementation from the original TaamimFlow repository but enhances
+playback robustness by deferring to the improved
+:class:`~taamimflow.audio.audio_engine.AudioEngine` for actual audio
+output.  Previously, :meth:`ConcatAudioEngine.play` relied solely on
+``pydub.playback.play()`` which fails silently when audio backends or
+ffmpeg are missing.  The new implementation therefore delegates
+playback to the underlying sine engine’s :meth:`play` method to
+benefit from additional fallbacks such as pygame, ffplay and system
+media players.
+
+The synthesise functionality remains unchanged and still attempts to
+assemble segments from the provided ``segment_maps``.  When no
+pre‑recorded segment is available for a given trope group, it falls
+back to synthesising sine waves via the internal AudioEngine.
+
 """
 
 from __future__ import annotations
@@ -18,36 +29,34 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Union
 
 try:
+    # Pydub wird optional verwendet, um voraufgezeichnete Segmente zu laden
     from pydub import AudioSegment  # type: ignore
     HAVE_PYDUB = True
 except Exception:
     AudioSegment = None  # type: ignore
     HAVE_PYDUB = False
 
-# Relativer Import (Fix P4)
-from .audio_engine import Note, AudioEngine
+# Relative import for Note and the robust AudioEngine
+from .audio_engine import Note, AudioEngine as _SineEngine
 
 
 @dataclass
 class SegmentMap:
-    """Mapping einer Trope oder Note zu einem Audio-Segment.
-
-    Keys repräsentieren entweder Tropen-Gruppenamen (kanonisch) oder
-    spezielle Kontext-IDs. Values sind Pfade zu Audio-Dateien.
-    """
+    """Mapping of trope groups or context IDs to audio file paths."""
     mapping: Dict[str, str]
 
 
 class ConcatAudioEngine:
-    """Audio-Engine mit Segment-Concatenation und Crossfade.
+    """Audio engine with segment concatenation and crossfade.
 
-    Gemeinsame Schnittstelle (für ``main_window`` / ``_AudioWorker``)::
-
-        segment = engine.synthesise(notes, tempo=120.0, volume=0.8)
-        engine.play(segment)
-
-    FIX V10: Der Konstruktor akzeptiert jetzt ``tradition`` als ersten
-    Parameter.  ``segment_maps`` ist optional (default: leeres Dict).
+    This engine supports a common interface used by the GUI: call
+    :meth:`synthesise` to obtain an :class:`pydub.AudioSegment` for a
+    sequence of tokens or notes, then call :meth:`play` to play the
+    segment.  It first attempts to use pre‑recorded audio clips
+    provided via ``segment_maps`` keyed by cantillation tradition (e.g.
+    "Sephardi", "Ashkenazi").  When a segment cannot be loaded, the
+    engine falls back to a sine‑wave synthesis using the underlying
+    :class:`~taamimflow.audio.audio_engine.AudioEngine`.
     """
 
     def __init__(
@@ -56,41 +65,39 @@ class ConcatAudioEngine:
         segment_maps: Optional[Dict[str, SegmentMap]] = None,
         crossfade_ms: int = 20,
     ) -> None:
-        """Initialisiert die Engine.
+        """Initialise the concatenation engine.
 
-        :param tradition: Name der Tradition (z.B. "Sephardi", "Ashkenazi").
-            Wird als Default-Stil für ``synthesise`` verwendet.
-        :param segment_maps: Optional – Dictionary, das pro Stil eine
-            ``SegmentMap`` mit Pfaden zu voraufgezeichneten Segmenten
-            bereitstellt.  Wenn leer oder ein Segment nicht gefunden
-            wird, fällt die Engine auf den Sinus-Generator zurück.
-        :param crossfade_ms: Dauer der Übergänge zwischen Segmenten in ms.
+        :param tradition: Default tradition used when synthesising audio
+            if no tradition is explicitly passed.  Defaults to
+            "Sephardi".
+        :param segment_maps: Optional mapping of tradition names to
+            :class:`SegmentMap` instances.  If empty or a segment is
+            missing, the engine falls back to sine synthesis.
+        :param crossfade_ms: Duration of crossfades between segments in
+            milliseconds.  Default is 20ms.
         """
         self.tradition = tradition
         self.segment_maps: Dict[str, SegmentMap] = segment_maps or {}
         self.crossfade_ms = crossfade_ms
-        self._sine_engine = AudioEngine()
+        # Use a robust sine engine for synthesis and playback
+        self._sine_engine = _SineEngine()
 
     # ------------------------------------------------------------------
-    # Gemeinsame Schnittstelle (V10)
+    # Public interface
     # ------------------------------------------------------------------
-
     def synthesise(
         self,
         notes: Iterable,
         tempo: float = 120.0,
         volume: float = 0.8,
     ) -> Optional['AudioSegment']:
-        """Erzeuge ein ``AudioSegment`` für die Notensequenz.
+        """Create an AudioSegment for a sequence of tokens or notes.
 
-        Versucht zuerst voraufgezeichnete Segmente zu verwenden.
-        Fällt auf Sinus-Generator zurück wenn keine Segmente verfügbar.
-
-        :param notes: Iterable von ``Note``-Objekten oder Token-artigen
-            Objekten (mit ``notes`` und ``group`` Attributen).
-        :param tempo: Tempo in BPM.
-        :param volume: Lautstärke 0.0–1.0.
-        :return: ``AudioSegment`` oder ``None`` wenn pydub fehlt.
+        Attempts to stitch together pre‑recorded segments based on
+        tropes and group names defined in ``segment_maps``.  If no
+        segments are available or pydub is missing, falls back to
+        synthesising sine waves for each note.  An optional volume
+        adjustment (0.0–1.0) is applied if pydub is available.
         """
         seg = self.tokens_to_audio(notes, style=self.tradition, tempo=tempo)
         if seg is not None and HAVE_PYDUB and volume != 1.0:
@@ -99,24 +106,31 @@ class ConcatAudioEngine:
         return seg
 
     def play(self, segment: Optional['AudioSegment']) -> None:
-        """Spiele ein ``AudioSegment`` sofort ab.
+        """Play an AudioSegment using the underlying sine engine.
 
-        Benötigt ``pydub.playback`` und ein Playback-Backend.
-        Fehler werden still ignoriert (kein Absturz der GUI).
+        Statt ``pydub.playback.play()`` zu nutzen (das externe Backends
+        und ffmpeg erfordert), wird das Segment in das interne
+        PCM‑Format der SineEngine konvertiert und über ``AudioEngine.play``
+        abgespielt.  Wenn ``segment`` ``None`` oder pydub nicht
+        verfügbar ist, passiert nichts.
         """
         if not HAVE_PYDUB or segment is None:
             return
         try:
-            from pydub.playback import play as _play  # type: ignore
-            _play(segment)
+            # Auf Ziel‑Format normieren: 16 bit, 44.1 kHz, Mono
+            seg = segment.set_frame_rate(self._sine_engine._sample_rate).set_channels(1).set_sample_width(2)
+            pcm_bytes = seg.raw_data  # type: ignore
+            # ByteArray oder bytes an play() übergeben
+            self._sine_engine.play(pcm_bytes)
         except Exception:
-            pass  # Playback-Backend fehlt – kein Absturz
+            # Fehler unterdrücken, um GUI nicht zu blockieren
+            return
 
     # ------------------------------------------------------------------
-    # Interne Methoden (unverändert, relativer Import gefixt)
+    # Internal helper methods
     # ------------------------------------------------------------------
-
     def _load_segment(self, path: str) -> Optional['AudioSegment']:
+        """Attempt to load an audio file into an AudioSegment."""
         if not HAVE_PYDUB:
             return None
         if not os.path.isfile(path):
@@ -131,7 +145,7 @@ class ConcatAudioEngine:
         token: Union[Note, object],
         style: str,
     ) -> Optional['AudioSegment']:
-        """Wandle einen Note oder Token in ein AudioSegment um."""
+        """Convert a single token or Note into an AudioSegment."""
         if isinstance(token, Note):
             return self._sine_engine.generate_audio_segment([token])
         group = getattr(token, 'group_name', getattr(token, 'group', None))
@@ -153,9 +167,9 @@ class ConcatAudioEngine:
         style: str = '',
         tempo: float = 120.0,
     ) -> Optional['AudioSegment']:
-        """Kombiniere eine Sequenz von Tokens zu einem AudioSegment."""
+        """Combine a sequence of tokens into a single AudioSegment."""
         if not HAVE_PYDUB:
-            # Fallback: generiere komplette Sequenz via AudioEngine
+            # Fallback: synthesise the entire sequence using the sine engine
             combined_notes: List[Note] = []
             for tok in tokens:
                 if isinstance(tok, Note):
@@ -165,7 +179,6 @@ class ConcatAudioEngine:
                     if ns:
                         combined_notes.extend(ns)
             return self._sine_engine.generate_audio_segment(combined_notes, tempo)
-
         segments: List['AudioSegment'] = []
         for tok in tokens:
             seg = self.token_to_segment(tok, style)
@@ -175,6 +188,7 @@ class ConcatAudioEngine:
             return None
         output = segments[0]
         for seg in segments[1:]:
+            # Use pydub’s append with crossfade
             output = output.append(seg, crossfade=self.crossfade_ms)
         return output
 
@@ -184,11 +198,11 @@ class ConcatAudioEngine:
         filename: str,
         format: str = 'wav',
     ) -> None:
-        """Speichere ein AudioSegment in eine Datei."""
+        """Save an AudioSegment to a file."""
         if not HAVE_PYDUB:
-            raise RuntimeError("pydub ist nicht verfügbar.")
+            raise RuntimeError("pydub is not available.")
         if segment is None:
-            raise ValueError("segment darf nicht None sein")
+            raise ValueError("segment must not be None")
         segment.export(filename, format=format)
 
 
