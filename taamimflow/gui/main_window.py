@@ -1145,15 +1145,22 @@ class MainWindow(QMainWindow):
         )
 
     def _stop_playback(self) -> None:
-        """Stoppe laufende Wiedergabe."""
+        """Stoppe laufende Wiedergabe (NICHT-blockierend im Main-Thread).
+
+        Der Worker wird durch cancel() zum Abbruch aufgefordert.
+        thread.quit() schickt das Quit-Signal, wait() wird NICHT aufgerufen,
+        damit der Main-Thread nicht einfriert.  Qt räumt den Thread ab,
+        sobald er fertig ist.
+        """
         self._is_playing = False
         if self._audio_worker is not None:
             self._audio_worker.cancel()
-        if self._audio_thread is not None and self._audio_thread.isRunning():
+            self._audio_worker = None
+        if self._audio_thread is not None:
             self._audio_thread.quit()
-            self._audio_thread.wait(2000)
-        self._audio_thread = None
-        self._audio_worker = None
+            # KEIN thread.wait() hier – würde den Main-Thread für bis zu
+            # 2 Sekunden einfrieren!  Qt-Thread beendet sich von selbst.
+            self._audio_thread = None
 
     def _on_word_playing(self, index: int) -> None:
         """Wird aufgerufen wenn ein neues Wort beginnt zu spielen.
@@ -1270,26 +1277,43 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _audio_status_text(self) -> str:
-        """Zeige den tatsächlichen Audio-Status (pydub-Check)."""
+        """Zeige den tatsächlichen Audio-Status."""
         parts = []
         # Tokenizer
         if _HAS_CORE_CANTILLATION:
             parts.append("✅ core.cantillation")
         else:
             parts.append("⚠️ legacy tokeniser")
-        # Audio Engine – prüfe ob pydub wirklich importierbar ist
-        try:
-            import pydub  # noqa: F401
-            have_pydub = True
-        except ImportError:
-            have_pydub = False
+
+        # pydub direkt aus audio_engine prüfen (nicht nochmal importieren)
+        have_pydub = False
+        if _HAS_AUDIO_ENGINE:
+            try:
+                from ..audio.audio_engine import HAVE_PYDUB as _hp
+                have_pydub = _hp
+            except Exception:
+                try:
+                    import pydub  # noqa: F401
+                    have_pydub = True
+                except ImportError:
+                    pass
 
         if have_pydub and _HAS_CONCAT_AUDIO:
             parts.append("✅ ConcatAudio (pydub)")
         elif have_pydub and _HAS_AUDIO_ENGINE:
             parts.append("✅ AudioEngine (pydub)")
-        elif _HAS_AUDIO_ENGINE or _HAS_CONCAT_AUDIO:
-            parts.append("⚠️ pydub fehlt – pip install pydub")
+        elif _HAS_AUDIO_ENGINE:
+            # Audio-Engine geladen, pydub-Import schlug fehl
+            # Prüfe ob winsound/ffplay als Fallback vorhanden
+            import sys, subprocess
+            if sys.platform == "win32":
+                parts.append("✅ AudioEngine (winsound)")
+            else:
+                try:
+                    subprocess.run(["ffplay", "-version"], capture_output=True, timeout=2)
+                    parts.append("✅ AudioEngine (ffplay)")
+                except Exception:
+                    parts.append("⚠️ pydub fehlt – pip install pydub")
         else:
             parts.append("⚠️ kein Audio")
         return "\n".join(parts)
