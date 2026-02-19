@@ -28,8 +28,15 @@ from __future__ import annotations
 
 import math
 import os
+import logging
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Union
+
+from .audio_logger import configure_audio_logger
+
+# Ensure file logging is active as early as possible.
+configure_audio_logger()
+logger = logging.getLogger(__name__)
 
 try:
     # Pydub wird optional verwendet, um voraufgezeichnete Segmente zu laden
@@ -84,6 +91,12 @@ class ConcatAudioEngine:
         self.crossfade_ms = crossfade_ms
         # Use a robust sine engine for synthesis and playback
         self._sine_engine = _SineEngine()
+        logger.info(
+            "ConcatAudioEngine Startup: tradition=%s crossfade_ms=%d pydub=%s",
+            self.tradition,
+            self.crossfade_ms,
+            HAVE_PYDUB,
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -102,10 +115,21 @@ class ConcatAudioEngine:
         synthesising sine waves for each note.  An optional volume
         adjustment (0.0–1.0) is applied if pydub is available.
         """
-        seg = self.tokens_to_audio(notes, style=self.tradition, tempo=tempo)
+        note_list = list(notes)
+        logger.debug(
+            "ConcatAudioEngine.synthesise: start items=%d tempo=%.2f volume=%.2f",
+            len(note_list),
+            tempo,
+            volume,
+        )
+        seg = self.tokens_to_audio(note_list, style=self.tradition, tempo=tempo)
         if seg is not None and HAVE_PYDUB and volume != 1.0:
             gain_db = 20.0 * math.log10(max(volume, 0.0001))
             seg = seg.apply_gain(gain_db)
+        logger.debug(
+            "ConcatAudioEngine.synthesise: done segment=%s",
+            "yes" if seg is not None else "no",
+        )
         return seg
 
     def play(self, segment: Optional['AudioSegment']) -> None:
@@ -118,15 +142,22 @@ class ConcatAudioEngine:
         verfügbar ist, passiert nichts.
         """
         if not HAVE_PYDUB or segment is None:
+            logger.debug(
+                "ConcatAudioEngine.play: skip – pydub=%s segment=%s",
+                HAVE_PYDUB,
+                "None" if segment is None else "yes",
+            )
             return
         try:
             # Auf Ziel‑Format normieren: 16 bit, 44.1 kHz, Mono
             seg = segment.set_frame_rate(self._sine_engine._sample_rate).set_channels(1).set_sample_width(2)
             pcm_bytes = seg.raw_data  # type: ignore
+            logger.info("ConcatAudioEngine.play: playing %d bytes", len(pcm_bytes))
             # ByteArray oder bytes an play() übergeben
             self._sine_engine.play(pcm_bytes)
-        except Exception:
+        except Exception as exc:
             # Fehler unterdrücken, um GUI nicht zu blockieren
+            logger.exception("ConcatAudioEngine.play: error: %s", exc)
             return
 
     # ------------------------------------------------------------------
@@ -135,12 +166,17 @@ class ConcatAudioEngine:
     def _load_segment(self, path: str) -> Optional['AudioSegment']:
         """Attempt to load an audio file into an AudioSegment."""
         if not HAVE_PYDUB:
+            logger.debug("_load_segment: pydub nicht verfügbar")
             return None
         if not os.path.isfile(path):
+            logger.debug("_load_segment: Datei nicht gefunden: %s", path)
             return None
         try:
-            return AudioSegment.from_file(path)  # type: ignore
-        except Exception:
+            seg = AudioSegment.from_file(path)  # type: ignore
+            logger.debug("_load_segment: geladen: %s", path)
+            return seg
+        except Exception as exc:
+            logger.exception("_load_segment: Fehler beim Laden %s: %s", path, exc)
             return None
 
     def token_to_segment(

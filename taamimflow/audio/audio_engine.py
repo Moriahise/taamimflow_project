@@ -36,19 +36,26 @@ verfügbar ist, ist keine Audioausgabe möglich.
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass
 from typing import Iterable, Optional, Union
 
+from .audio_logger import configure_audio_logger
+
+# Ensure file logging is active as early as possible.
+configure_audio_logger()
+logger = logging.getLogger(__name__)
+
 # QtMultimedia für Audioausgabe
 try:
-    from PyQt6.QtMultimedia import QAudioFormat, QAudioOutput, QAudioDevice
+    from PyQt6.QtMultimedia import QAudioFormat, QAudioOutput, QMediaDevices
     from PyQt6.QtCore import QBuffer, QIODevice, QByteArray
     HAVE_QT = True
 except Exception:
     # Dummy Klassen für Typing, wenn Qt fehlt
     QAudioFormat = object  # type: ignore
     QAudioOutput = object  # type: ignore
-    QAudioDevice = object  # type: ignore
+    QMediaDevices = object  # type: ignore
     QBuffer = object  # type: ignore
     QIODevice = object  # type: ignore
     QByteArray = bytes  # type: ignore
@@ -94,18 +101,38 @@ class AudioEngine:
             fmt = QAudioFormat()
             fmt.setChannelCount(1)
             fmt.setSampleRate(self._sample_rate)
-            fmt.setSampleSize(16)
-            fmt.setSampleType(QAudioFormat.SampleType.SignedInt)
-            fmt.setCodec("audio/pcm")
-            # Standard‑Ausgabegerät wählen
-            device = QAudioDevice.defaultAudioOutput()
+            # Qt6 bevorzugt setSampleFormat; ältere Bindings haben setSampleSize/setSampleType
+            try:
+                fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            except Exception:
+                try:
+                    fmt.setSampleSize(16)
+                    fmt.setSampleType(QAudioFormat.SampleType.SignedInt)
+                    fmt.setCodec("audio/pcm")
+                except Exception:
+                    logger.exception("AudioEngine: Konnte QAudioFormat nicht konfigurieren")
+
+            # Standard‑Ausgabegerät wählen (Qt6: QMediaDevices)
+            device = QMediaDevices.defaultAudioOutput()
+            try:
+                if hasattr(device, "isNull") and device.isNull():
+                    logger.error("AudioEngine: Kein Standard-Audioausgabegerät verfügbar (device.isNull())")
+                    self._audio_out = None  # type: ignore
+                    self._buffer = None
+                    self._format = fmt
+                    return
+            except Exception:
+                pass
+
             self._audio_out: QAudioOutput = QAudioOutput(device, fmt)  # type: ignore
             self._buffer: Optional[QBuffer] = None
             self._format = fmt
+            logger.info("AudioEngine Startup: QtMultimedia OK, sample_rate=%d", self._sample_rate)
         else:
             self._audio_out = None  # type: ignore
             self._buffer = None
             self._format = None  # type: ignore
+            logger.warning("AudioEngine Startup: QtMultimedia NICHT verfügbar – keine Wiedergabe möglich")
 
     # ------------------------------------------------------------------
     # Hilfsfunktionen
@@ -162,15 +189,25 @@ class AudioEngine:
         :return: Rohbytes als ``QByteArray`` oder ``None`` wenn keine
           Noten angegeben wurden.
         """
-        # Keine Noten → nichts zu tun
-        has_notes = False
+        # Liste erzeugen, damit wir zählen und protokollieren können
+        note_list = list(notes)
+        if not note_list:
+            logger.debug("synthesise: leere Notensequenz – Rückgabe None")
+            return None
+
+        logger.debug(
+            "synthesise: beginne Synthese (%d Noten, tempo=%.2f, volume=%.2f)",
+            len(note_list),
+            tempo,
+            volume,
+        )
+
         # Dauer einer Viertelnote
         beat_sec = 60.0 / tempo
         max_amp = 32767 * max(min(volume, 1.0), 0.0)
         sample_rate = self._sample_rate
         pcm = bytearray()
-        for note in notes:
-            has_notes = True
+        for note in note_list:
             freq = self.pitch_to_frequency(note.pitch)
             dur_sec = note.duration * beat_sec
             n_samples = max(1, int(dur_sec * sample_rate))
@@ -179,8 +216,13 @@ class AudioEngine:
                 t = i / sample_rate
                 value = int(max_amp * math.sin(2 * math.pi * freq * t))
                 pcm += value.to_bytes(2, byteorder='little', signed=True)
-        if not has_notes:
-            return None
+
+        logger.debug(
+            "synthesise: abgeschlossen – %d Bytes (%d Samples)",
+            len(pcm),
+            len(pcm) // 2,
+        )
+
         # Rückgabe als QByteArray
         return QByteArray(pcm) if HAVE_QT else QByteArray(bytes(pcm))  # type: ignore
 
@@ -222,6 +264,10 @@ class AudioEngine:
     def _play_bytes(self, raw: bytes) -> None:
         """Spiele rohe PCM‑Bytes via ``QAudioOutput`` ab (nicht‑blockierend)."""
         if not HAVE_QT or not raw:
+            logger.debug("_play_bytes: Abbruch – HAVE_QT=%s raw_len=%s", HAVE_QT, len(raw) if raw else 0)
+            return
+        if self._audio_out is None:
+            logger.error("_play_bytes: Kein QAudioOutput vorhanden – kein Audio-Gerät?")
             return
         # Erzeuge ByteArray aus Rohbytes
         data = QByteArray(raw)
@@ -232,6 +278,7 @@ class AudioEngine:
         self._buffer.open(QIODevice.OpenModeFlag.ReadOnly)  # type: ignore
         # Abspielen starten
         self._audio_out.start(self._buffer)
+        logger.info("_play_bytes: Wiedergabe gestartet (%d Bytes)", len(raw))
 
     def play(self, data: Optional[Union[QByteArray, bytes, 'AudioSegment']]) -> None:
         """Spiele PCM‑Daten oder ``AudioSegment`` ab.
@@ -247,25 +294,31 @@ class AudioEngine:
         Wiedergabe läuft nicht‑blockierend.
         """
         if data is None:
+            logger.debug("play: keine Daten – überspringe")
             return
         # AudioSegment → PCM wandeln
         if HAVE_PYDUB and isinstance(data, AudioSegment):
+            logger.debug("play: AudioSegment erhalten – konvertiere")
             try:
                 seg = data.set_frame_rate(self._sample_rate).set_channels(1).set_sample_width(2)
                 pcm = seg.raw_data  # type: ignore
                 self._play_bytes(pcm)
-            except Exception:
+            except Exception as exc:
+                logger.exception("play: Fehler beim Abspielen von AudioSegment: %s", exc)
                 return
             return
         # QByteArray → bytes
         if HAVE_QT and isinstance(data, QByteArray):  # type: ignore
+            logger.debug("play: QByteArray erhalten (%d Bytes)", len(bytes(data)))
             self._play_bytes(bytes(data))
             return
         # bytes oder bytearray direkt
         if isinstance(data, (bytes, bytearray)):
+            logger.debug("play: raw bytes erhalten (%d Bytes)", len(data))
             self._play_bytes(bytes(data))
             return
         # Andere Typen ignorieren
+        logger.debug("play: unbekannter Datentyp %s – überspringe", type(data))
         return
 
 __all__ = ["Note", "AudioEngine"]

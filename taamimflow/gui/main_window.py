@@ -65,9 +65,15 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
     QMessageBox,
+    QPlainTextEdit,
 )
 from PyQt6.QtGui import QAction, QFont, QColor, QPalette
-from PyQt6.QtCore import Qt, QSize, QDate, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QSize, QDate, QThread, pyqtSignal, QObject, QTimer
+
+from ..audio.audio_logger import configure_audio_logger, get_audio_log_path
+
+# Ensure audio debug logging is configured as early as possible.
+configure_audio_logger()
 
 from ..config import get_app_config
 from ..connectors import get_default_connector
@@ -85,7 +91,7 @@ from ..utils.sedrot_parser import (
     get_maftir_refs,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("taamimflow.audio.gui")
 
 # ── Optional imports with safe fallbacks ──────────────────────────────────────
 
@@ -241,6 +247,45 @@ class _WordByWordWorker(QObject):
             self.finished.emit()
 
 
+class DebugLogDialog(QDialog):
+    """Dialog to display the audio debug log in real time."""
+
+    def __init__(self, log_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Audio Debug-Protokoll")
+        self.resize(900, 600)
+        self._log_path = log_path
+
+        layout = QVBoxLayout(self)
+        self._text = QPlainTextEdit(self)
+        self._text.setReadOnly(True)
+        layout.addWidget(self._text)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)  # 1 second
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        try:
+            if os.path.exists(self._log_path):
+                with open(self._log_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            else:
+                content = "(audio_debug.log wurde noch nicht erstellt.)"
+        except Exception as exc:
+            content = f"(Fehler beim Lesen von {self._log_path}: {exc})"
+
+        # Only update if changed, to avoid flicker.
+        if content != self._text.toPlainText():
+            self._text.setPlainText(content)
+            cursor = self._text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._text.setTextCursor(cursor)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MainWindow
 # ──────────────────────────────────────────────────────────────────────────────
@@ -381,6 +426,12 @@ class MainWindow(QMainWindow):
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+        # DEBUG ─────────────────────────────────────────────────────────
+        debug_menu = menubar.addMenu("&Debug")
+        show_log_action = QAction("Debug‑Protokoll anzeigen", self)
+        show_log_action.triggered.connect(self._show_debug_log)
+        debug_menu.addAction(show_log_action)
 
     # ------------------------------------------------------------------
     # Customisation  (from V5 – fully preserved)
@@ -1011,17 +1062,14 @@ class MainWindow(QMainWindow):
         """Return a suitable audio engine instance or *None*.
 
         FIX V10.1: Die ``audio.enabled``-Config-Abfrage ist entfernt.
-        Diese Methode versucht immer, einen funktionsfähigen
-        Audio-Engine zu konstruieren.  Die Reihenfolge lautet:
+        Die Engine wird immer zurückgegeben wenn pydub verfügbar ist –
+        ohne manuelle Config-Änderung.  Nur wenn weder AudioEngine noch
+        ConcatAudioEngine importierbar sind, wird None zurückgegeben.
 
-        1. :class:`ConcatAudioEngine` – wenn vorhanden, um voraufgezeichnete
-           Segmente abzuspielen; bei fehlenden Segmenten nutzt sie den
-           integrierten Sinus‑Generator.
-        2. :class:`AudioEngine` – generiert Sinuswellen und spielt sie
-           über QtMultimedia ab.  Diese Engine benötigt keine externen
-           Bibliotheken wie pydub oder ffmpeg.
-        3. ``None`` – nur wenn beide Klassen nicht importiert werden
-           konnten (z.B. weil das Paket fehlt).
+        Reihenfolge:
+        1. ConcatAudioEngine (mit Samples falls vorhanden, sonst Sinus-Fallback)
+        2. AudioEngine       (reiner Sinus-Generator)
+        3. None              (pydub komplett fehlt)
         """
         tradition = self.current_pronunciation  # "Sephardi" / "Ashkenazi" / "Yemenite"
 
@@ -1111,10 +1159,9 @@ class MainWindow(QMainWindow):
             return
 
         engine = self._get_audio_engine()
-        # If no audio engine could be constructed, display a generic message
         if engine is None:
             self.statusBar().showMessage(
-                "Audio nicht verfügbar – keine passende Audio-Engine vorhanden"
+                "Audio nicht verfügbar – pydub installieren: pip install pydub"
             )
             return
 
@@ -1289,21 +1336,35 @@ class MainWindow(QMainWindow):
         else:
             parts.append("⚠️ legacy tokeniser")
 
-        # Determine the availability of audio engines
-        # If ConcatAudioEngine is available, show that first
-        if _HAS_CONCAT_AUDIO and ConcatAudioEngine is not None:
-            parts.append("✅ ConcatAudio")
-        # Primary AudioEngine status
-        if _HAS_AUDIO_ENGINE and AudioEngine is not None:
+        # pydub direkt aus audio_engine prüfen (nicht nochmal importieren)
+        have_pydub = False
+        if _HAS_AUDIO_ENGINE:
             try:
-                # Import HAVE_QT from audio.engine for runtime check
-                from ..audio.audio_engine import HAVE_QT as _have_qt  # type: ignore
+                from ..audio.audio_engine import HAVE_PYDUB as _hp
+                have_pydub = _hp
             except Exception:
-                _have_qt = False  # type: ignore
-            if _have_qt:
-                parts.append("✅ AudioEngine (Qt)")
+                try:
+                    import pydub  # noqa: F401
+                    have_pydub = True
+                except ImportError:
+                    pass
+
+        if have_pydub and _HAS_CONCAT_AUDIO:
+            parts.append("✅ ConcatAudio (pydub)")
+        elif have_pydub and _HAS_AUDIO_ENGINE:
+            parts.append("✅ AudioEngine (pydub)")
+        elif _HAS_AUDIO_ENGINE:
+            # Audio-Engine geladen, pydub-Import schlug fehl
+            # Prüfe ob winsound/ffplay als Fallback vorhanden
+            import sys, subprocess
+            if sys.platform == "win32":
+                parts.append("✅ AudioEngine (winsound)")
             else:
-                parts.append("⚠️ AudioEngine verfügbar, aber QtMultimedia fehlt")
+                try:
+                    subprocess.run(["ffplay", "-version"], capture_output=True, timeout=2)
+                    parts.append("✅ AudioEngine (ffplay)")
+                except Exception:
+                    parts.append("⚠️ pydub fehlt – pip install pydub")
         else:
             parts.append("⚠️ kein Audio")
         return "\n".join(parts)
@@ -1322,6 +1383,17 @@ class MainWindow(QMainWindow):
             f"<b>Audio:</b> {'ConcatAudio (M10.2)' if _HAS_CONCAT_AUDIO else 'AudioEngine MVP' if _HAS_AUDIO_ENGINE else 'unavailable'}<br/>"
             "<br/>Built with PyQt6 · Python",
         )
+
+    def _show_debug_log(self) -> None:
+        """Open a live view of the audio debug log."""
+        try:
+            log_path = str(get_audio_log_path())
+        except Exception:
+            # Fallback: repo root assumed to be current working directory
+            log_path = os.path.join(os.getcwd(), "audio_debug.log")
+
+        dlg = DebugLogDialog(log_path, self)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Verse / Chapter / Aliyah metadata extraction  (NEW in V9)
