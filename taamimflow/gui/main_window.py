@@ -1011,14 +1011,17 @@ class MainWindow(QMainWindow):
         """Return a suitable audio engine instance or *None*.
 
         FIX V10.1: Die ``audio.enabled``-Config-Abfrage ist entfernt.
-        Die Engine wird immer zurückgegeben wenn pydub verfügbar ist –
-        ohne manuelle Config-Änderung.  Nur wenn weder AudioEngine noch
-        ConcatAudioEngine importierbar sind, wird None zurückgegeben.
+        Diese Methode versucht immer, einen funktionsfähigen
+        Audio-Engine zu konstruieren.  Die Reihenfolge lautet:
 
-        Reihenfolge:
-        1. ConcatAudioEngine (mit Samples falls vorhanden, sonst Sinus-Fallback)
-        2. AudioEngine       (reiner Sinus-Generator)
-        3. None              (pydub komplett fehlt)
+        1. :class:`ConcatAudioEngine` – wenn vorhanden, um voraufgezeichnete
+           Segmente abzuspielen; bei fehlenden Segmenten nutzt sie den
+           integrierten Sinus‑Generator.
+        2. :class:`AudioEngine` – generiert Sinuswellen und spielt sie
+           über QtMultimedia ab.  Diese Engine benötigt keine externen
+           Bibliotheken wie pydub oder ffmpeg.
+        3. ``None`` – nur wenn beide Klassen nicht importiert werden
+           konnten (z.B. weil das Paket fehlt).
         """
         tradition = self.current_pronunciation  # "Sephardi" / "Ashkenazi" / "Yemenite"
 
@@ -1108,9 +1111,10 @@ class MainWindow(QMainWindow):
             return
 
         engine = self._get_audio_engine()
+        # If no audio engine could be constructed, display a generic message
         if engine is None:
             self.statusBar().showMessage(
-                "Audio nicht verfügbar – pydub installieren: pip install pydub"
+                "Audio nicht verfügbar – keine passende Audio-Engine vorhanden"
             )
             return
 
@@ -1285,35 +1289,21 @@ class MainWindow(QMainWindow):
         else:
             parts.append("⚠️ legacy tokeniser")
 
-        # pydub direkt aus audio_engine prüfen (nicht nochmal importieren)
-        have_pydub = False
-        if _HAS_AUDIO_ENGINE:
+        # Determine the availability of audio engines
+        # If ConcatAudioEngine is available, show that first
+        if _HAS_CONCAT_AUDIO and ConcatAudioEngine is not None:
+            parts.append("✅ ConcatAudio")
+        # Primary AudioEngine status
+        if _HAS_AUDIO_ENGINE and AudioEngine is not None:
             try:
-                from ..audio.audio_engine import HAVE_PYDUB as _hp
-                have_pydub = _hp
+                # Import HAVE_QT from audio.engine for runtime check
+                from ..audio.audio_engine import HAVE_QT as _have_qt  # type: ignore
             except Exception:
-                try:
-                    import pydub  # noqa: F401
-                    have_pydub = True
-                except ImportError:
-                    pass
-
-        if have_pydub and _HAS_CONCAT_AUDIO:
-            parts.append("✅ ConcatAudio (pydub)")
-        elif have_pydub and _HAS_AUDIO_ENGINE:
-            parts.append("✅ AudioEngine (pydub)")
-        elif _HAS_AUDIO_ENGINE:
-            # Audio-Engine geladen, pydub-Import schlug fehl
-            # Prüfe ob winsound/ffplay als Fallback vorhanden
-            import sys, subprocess
-            if sys.platform == "win32":
-                parts.append("✅ AudioEngine (winsound)")
+                _have_qt = False  # type: ignore
+            if _have_qt:
+                parts.append("✅ AudioEngine (Qt)")
             else:
-                try:
-                    subprocess.run(["ffplay", "-version"], capture_output=True, timeout=2)
-                    parts.append("✅ AudioEngine (ffplay)")
-                except Exception:
-                    parts.append("⚠️ pydub fehlt – pip install pydub")
+                parts.append("⚠️ AudioEngine verfügbar, aber QtMultimedia fehlt")
         else:
             parts.append("⚠️ kein Audio")
         return "\n".join(parts)

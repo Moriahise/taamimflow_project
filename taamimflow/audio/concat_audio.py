@@ -4,20 +4,23 @@ Concatenation‑based Audio Engine with Enhanced Playback
 
 This module provides an audio engine that concatenates pre‑recorded
 cantillation segments with crossfades.  It closely mirrors the
-implementation from the original TaamimFlow repository but enhances
-playback robustness by deferring to the improved
-:class:`~taamimflow.audio.audio_engine.AudioEngine` for actual audio
-output.  Previously, :meth:`ConcatAudioEngine.play` relied solely on
-``pydub.playback.play()`` which fails silently when audio backends or
-ffmpeg are missing.  The new implementation therefore delegates
-playback to the underlying sine engine’s :meth:`play` method to
-benefit from additional fallbacks such as pygame, ffplay and system
-media players.
+implementation from the original TaamimFlow repository but has been
+updated to use the new :class:`~taamimflow.audio.audio_engine.AudioEngine`
+for all audio output.  In earlier versions
+``ConcatAudioEngine.play`` relied on ``pydub.playback.play()`` and a
+chain of external back‑end players (winsound, ffplay, system media
+players), which often failed silently or blocked the GUI when audio
+back‑ends were not installed.  The current version converts any
+:class:`pydub.AudioSegment` into raw PCM bytes and passes them to
+the underlying sine engine’s :meth:`play` method.  Playback is
+therefore non‑blocking and depends only on QtMultimedia (no external
+players or libraries required).
 
 The synthesise functionality remains unchanged and still attempts to
-assemble segments from the provided ``segment_maps``.  When no
-pre‑recorded segment is available for a given trope group, it falls
-back to synthesising sine waves via the internal AudioEngine.
+assemble segments from the provided ``segment_maps`` using pydub
+when available.  When no pre‑recorded segment is available for a
+given trope group, it falls back to synthesising sine waves via
+the internal AudioEngine.
 
 """
 

@@ -3,32 +3,37 @@ Modernised Audio Utility Module
 ===============================
 
 This module provides a high‑level audio interface for TaamimFlow’s
-simplified GUI.  The previous implementation was a skeletal placeholder
-that merely slept for the duration of the requested notes and raised a
-``NotImplementedError`` when asked to play a file.  As a result, the
-application appeared to freeze and produced no sound on playback.  To
-address these issues the new ``AudioEngine`` delegates synthesis and
-playback to the robust engine in :mod:`taamimflow.audio.audio_engine`.
+simplified GUI.  Earlier versions of this module were skeletal
+placeholders that simply slept for the duration of the requested
+notes and raised ``NotImplementedError`` when asked to play a file,
+causing the application to freeze without producing any sound.  The
+current version delegates synthesis and playback to the robust
+engine in :mod:`taamimflow.audio.audio_engine`, which synthesises
+PCM audio from notes and plays it via QtMultimedia.  There are
+no dependencies on pydub or external media players for note
+playback.
 
 Key features:
 
-* **Real sound generation** using sine‑wave synthesis via pydub.  Each
-  note in the provided sequence is converted into a :class:`~taamimflow.audio.audio_engine.Note` and
-  synthesised into an :class:`pydub.AudioSegment` with correct tempo.
+* **Real sound generation** using sine‑wave synthesis.  Each note in the
+  provided sequence is converted into a :class:`~taamimflow.audio.audio_engine.Note`
+  and synthesised into raw PCM data at the requested tempo and volume.
 * **Non‑blocking playback** courtesy of the underlying engine.  While
   this class itself does not manage threads, the calling GUI should
   invoke playback on a worker thread as already implemented in the
-  full ``main_window``.  The internal engine uses multiple
-  fallbacks (pydub, winsound, pygame, ffplay, system media player) to
-  maximise compatibility.
-* **File playback** using pydub when available, with graceful fallback
-  to launching the file via the operating system’s default media
-  handler if pydub cannot decode the file.
+  full ``main_window``.  Playback uses QtMultimedia and does not
+  block the GUI.
+* **File playback** is still supported via pydub when available;
+  otherwise the file is opened with the operating system’s default
+  media handler.  This functionality is optional and separate from
+  note synthesis.
 
 With these improvements the simplified GUI can now produce audible
-feedback without blocking the user interface, provided the user has
-installed at least one of the supported audio backends (``simpleaudio``,
-``pygame``, ``ffplay``, etc.).
+feedback without requiring the user to install external audio
+back‑ends (``simpleaudio``, ``pygame``, ``ffplay``, etc.).  The only
+requirement for note playback is ``PyQt6``; if it is unavailable
+the module still returns synthesised PCM data but does not play
+sound.
 
 """
 
