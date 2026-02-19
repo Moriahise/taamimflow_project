@@ -1,51 +1,62 @@
-"""Ta'amimFlow core package.
+"""
+Top‑level package for Ta'amimFlow.
 
-Ta'amimFlow is a modular, extensible platform for learning and practicing
-Hebrew cantillation (ta'amim) on modern systems.  It is inspired by the
-original TropeTrainer application but is being rebuilt from the ground up
-using open data sources and modern technology.  All heavy logic
-for parsing trope definitions, managing calendar data, retrieving texts
-from external sources, and rendering content lives in subpackages of
-``taamimflow``.
+This package provides the high‑level entry points for the cantillation and
+audio subsystems alongside the existing GUI and configuration helpers.  It
+exposes a minimal API so that callers do not have to delve into internal
+submodules.  Most of the heavy lifting lives in the ``core`` and ``audio``
+packages.
 
-The top‑level package exposes high level entrypoints and shared
-functionality.  Importing ``taamimflow`` will automatically expose
-important classes and functions under a concise namespace, for example:
+Example usage::
 
-.. code-block:: python
+    from taamimflow import AppConfig, MainWindow
+    from taamimflow import extract_tokens_with_notes
+    from taamimflow import AudioEngine
 
-   from taamimflow import AppConfig, get_default_connector, MainWindow
+    # load configuration
+    cfg = AppConfig.load()
+    
+    # perform cantillation analysis
+    tokens = extract_tokens_with_notes("בראשית ברא אלהים")
 
-The project is organised into several subpackages:
+    # play the note sequence via the default audio engine
+    engine = AudioEngine()
+    audio_segment = engine.synthesise([note for token in tokens for note in token.notes])
+    engine.play(audio_segment)
 
-``config``
-    Loading and managing application configuration.
-
-``connectors``
-    Interfaces for retrieving biblical text and metadata from a variety
-    of sources (e.g., Sefaria API, local files).  New connectors can be
-    added without modifying the core application.
-
-``data``
-    Parsers for static XML definitions such as trope melodies, trope
-    names and reading schedules (sedrot).  These parsers return Python
-    data structures that can be consumed by the GUI or audio engine.
-
-``gui``
-    Widgets, dialogs and the main application window built with
-    PyQt6.  The GUI communicates with connectors and data parsers to
-    display text, control audio playback and manage user interactions.
-
-``utils``
-    Helper modules such as audio handling and Hebrew text utilities.
-
-The build is intentionally minimal at this stage.  Many components are
-implemented as stubs with clear docstrings describing their intended
-purpose.  Developers are encouraged to extend the functionality by
-following the patterns established here.  See the README for guidance
-on contributing and the technical roadmap for the long‑term vision.
+The API surface intentionally re‑exports only a handful of symbols to
+keep the namespace tidy.  If you need lower‑level functionality, import
+directly from the subpackages (``taamimflow.core`` or ``taamimflow.audio``).
 """
 
 from .config import AppConfig, get_app_config  # noqa: F401
 from .connectors import get_default_connector  # noqa: F401
 from .gui.main_window import MainWindow  # noqa: F401
+
+# Re‑export selected high‑level functions and classes from the new core/audio packages.
+try:
+    # Cantillation extraction pipeline
+    from .core.cantillation import extract_tokens_with_notes, TokenFull  # type: ignore[F401]
+except Exception:
+    # The core package may not be installed yet; ignore import errors during partial installs.
+    extract_tokens_with_notes = None  # type: ignore
+    TokenFull = None  # type: ignore
+
+try:
+    # Audio synthesis engines
+    from .audio.audio_engine import AudioEngine  # type: ignore[F401]
+    from .audio.concat_audio import ConcatAudioEngine  # type: ignore[F401]
+except Exception:
+    AudioEngine = None  # type: ignore
+    ConcatAudioEngine = None  # type: ignore
+
+__all__ = [
+    "AppConfig",
+    "get_app_config",
+    "get_default_connector",
+    "MainWindow",
+    "extract_tokens_with_notes",
+    "TokenFull",
+    "AudioEngine",
+    "ConcatAudioEngine",
+]
