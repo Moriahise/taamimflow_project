@@ -85,80 +85,27 @@ def _hebrew_year_days(year: int) -> int:
 
 
 def _gregorian_to_hebrew_approx(gdate: QDate) -> str:
-    """Return a *rough* Hebrew date string for display purposes.
-
-    This uses a simplified offset calculation.  For accurate results
-    a proper Hebrew calendar library should be used.  If the
-    ``hdate`` package is available it will be preferred automatically.
-    """
-    # Try using the hdate library first (pip install hdate)
+    """Return a Hebrew date string.  Uses hebrew_calendar.py (accurate) when available."""
+    if _HC_AVAILABLE:
+        try:
+            return _hc_date_str(gdate.year(), gdate.month(), gdate.day())
+        except Exception:
+            pass
+    # Fallback to external libraries
     try:
         from hdate import HDate  # type: ignore[import-untyped]
-
         hd = HDate(gdate.toPyDate(), hebrew=False)
         return f"{hd.hdate_he_str()}"
     except Exception:
         pass
-
-    # Try using pyluach
     try:
         from pyluach.dates import GregorianDate  # type: ignore[import-untyped]
-
         gd = GregorianDate(gdate.year(), gdate.month(), gdate.day())
         hd = gd.to_heb()
-        month_names = {
-            1: "Nisan", 2: "Iyar", 3: "Sivan", 4: "Tammuz",
-            5: "Av", 6: "Elul", 7: "Tishrei", 8: "Cheshvan",
-            9: "Kislev", 10: "Tevet", 11: "Shevat", 12: "Adar",
-            13: "Adar II",
-        }
-        month_name = month_names.get(hd.month, f"Month {hd.month}")
-        return f"{hd.day} {month_name}, {hd.year}"
-    except Exception:
-        pass
-
-    # Fallback: rough estimation using known epoch
-    # Tishrei 1, 5784 ≈ September 16, 2023
-    # This is intentionally approximate; production code should use
-    # a real Hebrew calendar library.
-    try:
-        epoch_greg = QDate(2023, 9, 16)  # 1 Tishrei 5784
-        diff_days = epoch_greg.daysTo(gdate)
-        h_year = 5784
-        while diff_days < 0:
-            h_year -= 1
-            diff_days += _hebrew_year_days(h_year)
-        while diff_days >= _hebrew_year_days(h_year):
-            diff_days -= _hebrew_year_days(h_year)
-            h_year += 1
-
-        # Rough month mapping (30 days each, alternating)
-        month_lengths = [30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29]
-        if _is_hebrew_leap_year(h_year):
-            month_lengths = [30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 30, 29]
-
-        # Months start from Tishrei (month index 0 = Tishrei)
-        tishrei_months = [
-            "Tishrei", "Cheshvan", "Kislev", "Tevet", "Shevat",
-        ]
-        if _is_hebrew_leap_year(h_year):
-            tishrei_months += ["Adar I", "Adar II"]
-        else:
-            tishrei_months += ["Adar"]
-        tishrei_months += ["Nisan", "Iyar", "Sivan", "Tammuz", "Av", "Elul"]
-
-        month_idx = 0
-        day_in_month = diff_days + 1
-        for i, ml in enumerate(month_lengths):
-            if day_in_month <= ml:
-                month_idx = i
-                break
-            day_in_month -= ml
-        else:
-            month_idx = len(month_lengths) - 1
-
-        month_name = tishrei_months[month_idx] if month_idx < len(tishrei_months) else "?"
-        return f"{int(day_in_month)} {month_name}, {h_year}"
+        mn = {1:"Nisan",2:"Iyar",3:"Sivan",4:"Tammuz",5:"Av",6:"Elul",
+              7:"Tishrei",8:"Cheshvan",9:"Kislev",10:"Tevet",11:"Shevat",
+              12:"Adar",13:"Adar II"}
+        return f"{hd.day} {mn.get(hd.month, str(hd.month))}, {hd.year}"
     except Exception:
         return ""
 
@@ -171,6 +118,36 @@ def _gregorian_to_hebrew_approx(gdate: QDate) -> str:
 # the original TropeTrainer.
 
 import datetime as _dt
+
+# ---------------------------------------------------------------------------
+# Ta'amimFlow Hebrew calendar engine
+# ---------------------------------------------------------------------------
+try:
+    import os as _os_hc
+    import sys as _sys_hc
+    _hc_candidates = [
+        _os_hc.path.join(_os_hc.path.dirname(_os_hc.path.abspath(__file__)), "hebrew_calendar.py"),
+        _os_hc.path.join(_os_hc.path.dirname(_os_hc.path.abspath(__file__)), "..", "hebrew_calendar.py"),
+        "hebrew_calendar.py",
+    ]
+    for _hc_path in _hc_candidates:
+        if _os_hc.path.isfile(_hc_path):
+            _hc_dir = _os_hc.path.dirname(_os_hc.path.abspath(_hc_path))
+            if _hc_dir not in _sys_hc.path:
+                _sys_hc.path.insert(0, _hc_dir)
+            break
+    from hebrew_calendar import (
+        greg_to_hebrew_str as _hc_date_str,
+        greg_to_hebrew_label as _hc_date_label,
+        header_hebrew_months as _hc_header,
+        build_month_data as _hc_build_month,
+        get_parsha_schedule as _hc_parsha_schedule,
+        rh_date as _hc_rh_date,
+        is_leap as _hc_is_leap,
+    )
+    _HC_AVAILABLE = True
+except Exception:
+    _HC_AVAILABLE = False
 
 # Days of week: 0=Sun, 1=Mon, ... 6=Sat
 _HEBREW_EPOCH_JD = 347998          # Julian Day Number for 1 Tishrei 1 (verified)
@@ -687,17 +664,29 @@ class _ParshaCalendarWidget(QWidget):
         """Build cell data for every day in (year, month).
 
         Returns {day: (heb_label, parsha_label, special_label)}.
+        Uses hebrew_calendar.build_month_data() when available (accurate,
+        includes all Jewish holidays and special Shabbatot).
         """
         key = (year, month)
         if key in self._cell_cache:
             return self._cell_cache[key]
 
-        # Approximate Hebrew date for each day
-        # Build parsha schedule for nearby Hebrew years
+        if _HC_AVAILABLE:
+            try:
+                diaspora = getattr(self, "_diaspora", True)
+                raw = _hc_build_month(year, month, diaspora)
+                # raw: {day: (heb_label, parsha_label, event_label)}
+                # Map to expected tuple format (heb_label, parsha_label, special_label)
+                self._cell_cache[key] = {
+                    d: (heb, parsha, ev) for d, (heb, parsha, ev) in raw.items()
+                }
+                return self._cell_cache[key]
+            except Exception:
+                pass  # Fall through to legacy code
+
+        # Legacy fallback (original code, used if hebrew_calendar.py not found)
         result: Dict[int, tuple] = {}
         days_in_month = QDate(year, month, 1).daysInMonth()
-
-        # Get parsha schedules for adjacent Hebrew years
         schedules: Dict[int, Dict[str, _dt.date]] = {}
 
         def _get_sched(hy: int) -> Dict[str, _dt.date]:
@@ -708,13 +697,11 @@ class _ParshaCalendarWidget(QWidget):
                     schedules[hy] = {}
             return schedules[hy]
 
-        # Build reverse map: greg_date -> parsha for Shabbatot
         greg_to_parsha: Dict[_dt.date, str] = {}
         approx_hy = year + 3760
         for hy in range(approx_hy - 1, approx_hy + 2):
             try:
-                sched = _get_sched(hy)
-                for parsha, gdate in sched.items():
+                for parsha, gdate in _get_sched(hy).items():
                     greg_to_parsha[gdate] = parsha
             except Exception:
                 pass
@@ -722,33 +709,20 @@ class _ParshaCalendarWidget(QWidget):
         for d in range(1, days_in_month + 1):
             gdate = _dt.date(year, month, d)
             qdate = QDate(year, month, d)
-
-            # Hebrew date string
             heb_str = _gregorian_to_hebrew_approx(qdate)
-            # Extract just "day month" part for compact display
             heb_label = ""
             if heb_str:
                 parts = heb_str.split(",")
                 if parts:
-                    day_month = parts[0].strip()  # e.g. "15 Shevat"
-                    heb_label = day_month
-
-            # Parsha on Shabbat
+                    heb_label = parts[0].strip()
             parsha_label = ""
-            dow = qdate.dayOfWeek()  # 1=Mon ... 6=Sat, 7=Sun
-            if dow == 6:  # Saturday
+            if qdate.dayOfWeek() == 6:
                 parsha_label = greg_to_parsha.get(gdate, "")
-
-            # Special events (Rosh Chodesh = Hebrew day 1 or 30+1)
             special_label = ""
             if heb_label:
-                day_part = heb_label.split(" ")[0]
-                if day_part == "1":
+                dp = heb_label.split(" ")[0]
+                if dp in ("1", "30"):
                     special_label = "Rosh Chodesh"
-                elif day_part == "30":
-                    # Day 30 = also Rosh Chodesh (two-day)
-                    special_label = "Rosh Chodesh"
-
             result[d] = (heb_label, parsha_label, special_label)
 
         self._cell_cache[key] = result
@@ -804,16 +778,23 @@ class _ParshaCalendarWidget(QWidget):
 
         # Month/year text
         month_name = QDate(self._view_year, self._view_month, 1).toString("MMMM yyyy")
-        heb_mid = _gregorian_to_hebrew_approx(
-            QDate(self._view_year, self._view_month, 15))
-        heb_month_label = ""
-        if heb_mid:
-            parts = heb_mid.split(",")
-            if len(parts) >= 2:
-                month_part = parts[0].strip().split(" ")
-                year_part = parts[-1].strip()
-                if len(month_part) >= 2:
-                    heb_month_label = f"{month_part[1]} {year_part}"
+        # Hebrew month label for header: accurate via hebrew_calendar module
+        if _HC_AVAILABLE:
+            try:
+                heb_month_label = _hc_header(self._view_year, self._view_month)
+            except Exception:
+                heb_month_label = ""
+        else:
+            heb_mid = _gregorian_to_hebrew_approx(
+                QDate(self._view_year, self._view_month, 15))
+            heb_month_label = ""
+            if heb_mid:
+                parts = heb_mid.split(",")
+                if len(parts) >= 2:
+                    month_part = parts[0].strip().split(" ")
+                    year_part = parts[-1].strip()
+                    if len(month_part) >= 2:
+                        heb_month_label = f"{month_part[1]} {year_part}"
 
         painter.setPen(QPen(QColor("white")))
         title_font = QF("Arial", 12, QF.Weight.Bold)
@@ -917,27 +898,63 @@ class _ParshaCalendarWidget(QWidget):
                 str(d),
             )
 
-            # Parsha name on Shabbat (bottom, blue/small)
-            if parsha_label:
-                parsha_color = QColor("white") if is_selected else QColor("#0000CC")
-                painter.setPen(QPen(parsha_color))
-                painter.setFont(QF("Arial", 7))
+            # ── Bottom text area: parsha + special labels ──────────────
+            # Determine which special labels to show
+            # Split: Shabbas-special (Zachor etc.) vs other events (RC etc.)
+            _all_specials = [s.strip() for s in special_label.split(",") if s.strip()] if special_label else []
+            _shabbas_specials = [s for s in _all_specials if s.startswith("Shabbas")]
+            _other_specials  = [s for s in _all_specials if not s.startswith("Shabbas")]
+
+            blue_color  = QColor("white") if is_selected else QColor("#0000CC")
+            green_color = QColor("white") if is_selected else QColor("#008000")
+            small_font  = QF("Arial", 7)
+            painter.setFont(small_font)
+
+            if parsha_label and _shabbas_specials:
+                # Two-line: parsha + special Shabbat name (like TropeTrainer)
+                painter.setPen(QPen(blue_color))
+                painter.drawText(
+                    QRect(cell_x + 1, cell_y + cell_rh - 24, cell_w - 2, 11),
+                    Qt.AlignmentFlag.AlignCenter, parsha_label,
+                )
+                painter.drawText(
+                    QRect(cell_x + 1, cell_y + cell_rh - 13, cell_w - 2, 11),
+                    Qt.AlignmentFlag.AlignCenter, _shabbas_specials[0],
+                )
+            elif parsha_label:
+                painter.setPen(QPen(blue_color))
                 painter.drawText(
                     QRect(cell_x + 1, cell_y + cell_rh - 20, cell_w - 2, 12),
-                    Qt.AlignmentFlag.AlignCenter,
-                    parsha_label,
+                    Qt.AlignmentFlag.AlignCenter, parsha_label,
+                )
+                # Rosh Chodesh below parsha if it coincides
+                if _other_specials:
+                    painter.setPen(QPen(green_color))
+                    painter.drawText(
+                        QRect(cell_x + 1, cell_y + cell_rh - 9, cell_w - 2, 9),
+                        Qt.AlignmentFlag.AlignCenter, _other_specials[0],
+                    )
+            elif _shabbas_specials:
+                painter.setPen(QPen(blue_color))
+                painter.drawText(
+                    QRect(cell_x + 1, cell_y + cell_rh - 20, cell_w - 2, 12),
+                    Qt.AlignmentFlag.AlignCenter, _shabbas_specials[0],
+                )
+            elif _other_specials:
+                painter.setPen(QPen(green_color))
+                painter.drawText(
+                    QRect(cell_x + 1, cell_y + cell_rh - 20, cell_w - 2, 12),
+                    Qt.AlignmentFlag.AlignCenter, _other_specials[0],
                 )
 
-            # Special event (Rosh Chodesh etc.)
-            if special_label and not parsha_label:
-                sp_color = QColor("white") if is_selected else QColor("#008000")
-                painter.setPen(QPen(sp_color))
-                painter.setFont(QF("Arial", 7))
-                painter.drawText(
-                    QRect(cell_x + 1, cell_y + cell_rh - 20, cell_w - 2, 12),
-                    Qt.AlignmentFlag.AlignCenter,
-                    special_label,
-                )
+            # Mon/Thu dot: small indicator that a Torah reading is available
+            _qdow = QDate(self._view_year, self._view_month, d).dayOfWeek()
+            if _qdow in (1, 4):  # Monday=1, Thursday=4 in Qt
+                dot_color = QColor("white") if is_selected else QColor("#8080CC")
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(dot_color)
+                painter.drawEllipse(cell_x + cell_w - 9, cell_y + 2, 5, 5)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
 
         painter.end()
 
@@ -1016,7 +1033,7 @@ class CalendarDialog(QDialog):
 
     def __init__(self, initial_date: QDate | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Trope Trainer Calendar")
+        self.setWindowTitle("Ta'amimFlow Calendar")
         self.setModal(True)
         self.setMinimumSize(580, 480)
         self._selected: QDate = initial_date or QDate.currentDate()
@@ -1812,15 +1829,32 @@ class OpenReadingDialog(QDialog):
             self._select_parsha_for_date(self.selected_date)
 
     def _select_parsha_for_date(self, qdate: QDate) -> None:
-        """Select the parsha radio button matching *qdate* and refresh options."""
-        gdate = _dt.date(qdate.year(), qdate.month(), qdate.day())
-        heb_year = self.year_spinbox.value()
+        """Select the parsha radio button matching *qdate* and refresh options.
 
-        # Build reverse map: gregorian date → parsha, check adjacent years too
+        Works for any day of the week:
+        - Shabbat: direct parsha lookup.
+        - Mon/Thu: finds the upcoming Shabbat of that week (the portion read
+          on Mon/Thu is the parsha of the immediately following Shabbat).
+        - Other days: uses the upcoming Shabbat as well so clicking any date
+          pre-selects the current week's parsha.
+        """
+        gdate = _dt.date(qdate.year(), qdate.month(), qdate.day())
+
+        # For non-Shabbat days, advance to the next Shabbat of that week
+        dow = qdate.dayOfWeek()  # Qt: 1=Mon … 6=Sat, 7=Sun
+        if dow != 6:  # not Shabbat
+            days_to_sat = (6 - dow) % 7
+            if days_to_sat == 0:
+                days_to_sat = 7
+            gdate = gdate + _dt.timedelta(days=days_to_sat)
+
+        # Estimate Hebrew year for lookup
+        approx_hy = gdate.year + 3760
         date_to_parsha: Dict[_dt.date, str] = {}
-        for hy in (heb_year - 1, heb_year, heb_year + 1):
+        _schedule_fn = _hc_parsha_schedule if _HC_AVAILABLE else _get_parsha_schedule_diaspora
+        for hy in (approx_hy - 1, approx_hy, approx_hy + 1):
             try:
-                for parsha, d in _get_parsha_schedule_diaspora(hy).items():
+                for parsha, d in _schedule_fn(hy).items():
                     date_to_parsha[d] = parsha
             except Exception:
                 pass
@@ -1829,14 +1863,16 @@ class OpenReadingDialog(QDialog):
         if not parsha:
             return
 
-        # Switch to Shabbat/Mon./Thu. tab
+        # Switch to Shabbat Mon./Thu. tab
         self.main_tabs.setCurrentIndex(0)
 
         # Find and check the matching radio button, then refresh options
         for btn in self.parsha_button_group.buttons():
-            if getattr(btn, "parsha_name", None) == parsha:
+            pname = getattr(btn, "parsha_name", btn.text())
+            # Handle combined parshas: "Nitzavim+Vayeilech" matches either part
+            if pname == parsha or parsha.startswith(pname) or pname.startswith(parsha):
                 btn.setChecked(True)
-                self._refresh_option_lists(parsha)
+                self._refresh_option_lists(pname)
                 break
 
     def _edit_custom_reading(self, reading_name: str) -> None:
