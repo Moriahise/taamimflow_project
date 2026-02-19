@@ -266,6 +266,29 @@ class ModernTorahTextWidget(QTextEdit):
             self.color_mode = mode
             self.update_display()
 
+    def highlight_word_at_index(self, index: int) -> None:
+        """Hebe das Wort mit dem gegebenen Index farbig hervor.
+
+        Wird während der Wiedergabe von main_window aufgerufen, um das
+        aktuell gesprochene Wort wie in TropeTrainer darzustellen.
+        Die Scrollposition bleibt erhalten.
+        """
+        if not self.tokens:
+            return
+        index = max(0, min(index, len(self.tokens) - 1))
+        if self._selected_index == index:
+            return  # Kein unnötiges Re-Render
+        # Scrollposition merken
+        vbar = self.verticalScrollBar()
+        hbar = self.horizontalScrollBar()
+        v_pos = vbar.value()
+        h_pos = hbar.value()
+        self._selected_index = index
+        self.update_display()
+        # Scrollposition wiederherstellen
+        vbar.setValue(v_pos)
+        hbar.setValue(h_pos)
+
     def setPlaceholderText(self, text: str) -> None:
         super().setPlaceholderText(text)
 

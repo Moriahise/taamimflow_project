@@ -31,7 +31,7 @@
   },
   
   "audio": {
-    "enabled": false,
+    "enabled": true,
     "default_volume": 0.8,
     "auto_play": false,
     "auto_repeat": false,

@@ -1,39 +1,29 @@
-"""
-Audio synthesis engines for Ta'amimFlow.
+"""Ta'amimFlow audio package.
 
-This subpackage provides classes for converting cantillation note
-sequences into playable audio.  Multiple engines are available:
+Exports the audio engine classes so that the GUI can import from
+``taamimflow.audio`` without knowing internal module names.
 
-* :class:`AudioEngine` – a minimal sinusoid generator that creates
-  artificial tones for each note.  Suitable for early prototyping.
+Both engines implement the common interface::
 
-* :class:`ConcatAudioEngine` – a professional concatenative engine that
-  stitches together pre‑recorded samples of cantillation motifs.  It
-  supports crossfading, per‑tradition samples and tempo scaling.
+    engine.synthesise(notes, tempo=120.0, volume=0.8) -> AudioSegment | None
+    engine.play(segment) -> None
 
-Additional helper functions and data structures live in
-``tradition_profiles`` and ``utils``.  The top‑level API expects
-engines to implement a common interface::
+Example::
 
-    engine = AudioEngine()  # or ConcatAudioEngine(tradition="Ashkenazi")
-    segment = engine.synthesise(notes, tempo=120, volume=0.8)
-    engine.play(segment)
-
-Note that the audio subsystem relies on external dependencies such as
-``pydub`` and ``ffmpeg``.  See the installation guide for details.
+    from taamimflow.audio import AudioEngine, ConcatAudioEngine
 """
 
-from .audio_engine import AudioEngine  # noqa: F401
-from .concat_audio import ConcatAudioEngine  # noqa: F401
+from .audio_engine import AudioEngine, Note
 
-# Optionally expose tradition metadata if available.
 try:
-    from .tradition_profiles import get_tradition_profiles  # type: ignore[F401]
-except Exception:
-    get_tradition_profiles = None  # type: ignore
+    from .concat_audio import ConcatAudioEngine
+    _HAS_CONCAT = True
+except ImportError:
+    ConcatAudioEngine = None  # type: ignore[assignment,misc]
+    _HAS_CONCAT = False
 
 __all__ = [
     "AudioEngine",
+    "Note",
     "ConcatAudioEngine",
-    "get_tradition_profiles",
 ]

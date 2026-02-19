@@ -1,8 +1,8 @@
 """
-Milestone 9.1 – Erweiterte Tropen‑Extraktion und Kontext‑Analyse
+Milestone 9.1 – Erweiterte Tropen-Extraktion und Kontext-Analyse
 ===============================================================
 
-Dieses Modul baut auf dem MVP aus Milestone 9 auf und erweitert die
+Dieses Modul baut auf dem MVP aus Milestone 9 auf und erweitert die
 Funktionalität in mehreren Punkten:
 
 * **Morphologische Segmentierung:** Verwendung eines optionalen
@@ -10,20 +10,19 @@ Funktionalität in mehreren Punkten:
   Aufteilung von Wörtern und Morphemen. Wenn das Paket nicht
   installiert ist, wird auf die einfache Wortteilung nach
   Leerzeichen zurückgegriffen.
-* **Kontext‑Flags:** Jedes Token enthält nun zusätzliche
-  Kontextinformationen wie Kapitel‑ und Alijah‑Grenzen sowie
-  benutzerdefinierte Attribut‑Labels. Diese Flags können bei der
+* **Kontext-Flags:** Jedes Token enthält nun zusätzliche
+  Kontextinformationen wie Kapitel- und Alijah-Grenzen sowie
+  benutzerdefinierte Attribut-Labels. Diese Flags können bei der
   Melodieauswahl berücksichtigt werden.
-* **Debug‑Ausgabe:** Für jedes Token wird eine Erklärung erzeugt,
+* **Debug-Ausgabe:** Für jedes Token wird eine Erklärung erzeugt,
   die beschreibt, welche Kontextdefinition aus der XML gegriffen hat
   und warum. Dies erleichtert das Nachvollziehen der
   Entscheidungslogik.
 
-Der Code ist so gestaltet, dass bestehende Schnittstellen (z.B. für
-die UI) nicht brechen: Die ursprünglichen Felder aus Milestone 9
-werden beibehalten, während neue Felder optional sind. Das Modul
-funktioniert sowohl eigenständig als auch eingebunden in das
-``taamimflow``‑Projekt.
+FIX V10: ``xml_path`` in ``extract_tokens_with_notes`` ist nun optional.
+Wenn kein Pfad angegeben wird, wird ``tropedef.xml`` automatisch über
+``find_data_file`` gesucht.  Falls die XML-Datei nicht gefunden wird,
+werden Tokens ohne Noten zurückgegeben (graceful degradation).
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 try:
-    # Re‑use definitions from the original project if available
+    # Re-use definitions from the original project if available
     from taamimflow.data.tropedef import Style, TropeDefinition, TropeContext, Note, load_trope_definitions  # type: ignore
 except ImportError:
     @dataclass
@@ -66,11 +65,11 @@ except ImportError:
     def load_trope_definitions(_: str | Path) -> List[Style]:  # type: ignore
         raise NotImplementedError(
             "load_trope_definitions() konnte nicht importiert werden. "
-            "Installiere das taamimflow‑Projekt oder importiere diese Funktion selbst."
+            "Installiere das taamimflow-Projekt oder importiere diese Funktion selbst."
         )
 
 # ---------------------------------------------------------------------------
-# Trope‑Gruppen und Mapping (wie in milestone9.py)
+# Trope-Gruppen und Mapping
 
 @dataclass(frozen=True)
 class TropeGroup:
@@ -99,18 +98,18 @@ GROUPS: Dict[str, TropeGroup] = {
     "Telisha Gedola":  TropeGroup("Telisha Gedola",  "#FFFFFF", "֠", 3),  # White
     # Konjunktive – hellgrün
     "Munach":          TropeGroup("Munach",          "#90EE90", "֣", 4),  # Light green
-    "Mahpakh":         TropeGroup("Mahpakh",         "#90EE90", "֤", 4),  # Light green
-    "Merkha":          TropeGroup("Merkha",          "#90EE90", "֥", 4),  # Light green
-    "Merkha Kefula":   TropeGroup("Merkha Kefula",   "#90EE90", "֦", 4),  # Light green
-    "Darga":           TropeGroup("Darga",           "#90EE90", "֧", 4),  # Light green
-    "Qadma":           TropeGroup("Qadma",           "#90EE90", "֨", 4),  # Light green
-    "Telisha Qetana":  TropeGroup("Telisha Qetana",  "#90EE90", "֩", 4),  # Light green
-    "Yerah Ben Yomo":  TropeGroup("Yerah Ben Yomo",  "#90EE90", "֪", 4),  # Light green
+    "Mahpakh":         TropeGroup("Mahpakh",         "#90EE90", "֤", 4),
+    "Merkha":          TropeGroup("Merkha",          "#90EE90", "֥", 4),
+    "Merkha Kefula":   TropeGroup("Merkha Kefula",   "#90EE90", "֦", 4),
+    "Darga":           TropeGroup("Darga",           "#90EE90", "֧", 4),
+    "Qadma":           TropeGroup("Qadma",           "#90EE90", "֨", 4),
+    "Telisha Qetana":  TropeGroup("Telisha Qetana",  "#90EE90", "֩", 4),
+    "Yerah Ben Yomo":  TropeGroup("Yerah Ben Yomo",  "#90EE90", "֪", 4),
     "Ole":             TropeGroup("Ole",             "#90EE90", "֫", 4),
     "Iluy":            TropeGroup("Iluy",            "#90EE90", "֬", 4),
     "Dehi":            TropeGroup("Dehi",            "#90EE90", "֭", 4),
     "Zinor":           TropeGroup("Zinor",           "#90EE90", "֮", 4),
-    "Unknown":         TropeGroup("Unknown",         "#D3D3D3", "?", 5),   # Light grey
+    "Unknown":         TropeGroup("Unknown",         "#D3D3D3", "?", 5),
 }
 
 _MARK_TO_GROUP: Dict[str, str] = {
@@ -155,7 +154,7 @@ _DISJUNCTIVE_MARKS = {
 
 @dataclass
 class Token:
-    """Basisklasse für ein Wort mit Tropen‑Metadaten."""
+    """Basisklasse für ein Wort mit Tropen-Metadaten."""
     word: str
     group_name: str
     symbol: str
@@ -172,12 +171,12 @@ class TokenWithNotes(Token):
 
 @dataclass
 class TokenFull(TokenWithNotes):
-    """Erweiterter Token für Milestone 9.1.
+    """Erweiterter Token für Milestone 9.1.
 
-    Neben den Basisinformationen enthält dieser Typ zusätzliche
-    Kontextflags (Kapitelanfang/‑ende, Alijahanfang/‑ende), frei
-    definierbare Attribute sowie eine Debug‑Beschreibung darüber, wie
-    die Noten ausgewählt wurden.
+    Rückwärtskompatibilität: ``trope_marks`` ist ein Alias für
+    ``trope_groups`` – damit alter Code in text_widget.py (der
+    ``token.trope_marks`` aufruft) weiter funktioniert ohne
+    AttributeError.
     """
     attributes: List[str] = field(default_factory=list)
     chapter_start: bool = False
@@ -186,19 +185,29 @@ class TokenFull(TokenWithNotes):
     aliyah_end: bool = False
     debug_info: Optional[str] = None
 
+    @property
+    def trope_marks(self) -> List[str]:
+        """Alias für trope_groups – Rückwärtskompatibilität mit text_widget.py.
+
+        text_widget.py ruft ``token.trope_marks`` auf, TokenFull hat
+        aber ``trope_groups``.  Diese Property macht beide Namen
+        gleichwertig ohne Änderungen an text_widget.py zu erfordern.
+        """
+        return self.trope_groups
+
 
 def normalise_hebrew(text: str) -> str:
-    """Normalisiere die Eingabe auf Unicode‑NFD."""
+    """Normalisiere die Eingabe auf Unicode-NFD."""
     return unicodedata.normalize("NFD", text) if text else text
 
 
 def _extract_marks(word: str) -> List[str]:
-    """Extrahiere alle Cantillation‑Marken aus einem Wort."""
+    """Extrahiere alle Cantillation-Marken aus einem Wort."""
     return [ch for ch in word if ch in _MARK_TO_GROUP]
 
 
 def _determine_group(marks: List[str], verse_end: bool) -> Tuple[str, str, str, List[str]]:
-    """Wie in milestone9.py: Wähle die passende Hauptgruppe."""
+    """Wähle die passende Hauptgruppe."""
     mark_names = [_MARK_TO_GROUP.get(m, "Unknown") for m in marks]
     if not marks and verse_end:
         grp = GROUPS["Sof Pasuk"]
@@ -226,11 +235,6 @@ def _determine_group(marks: List[str], verse_end: bool) -> Tuple[str, str, str, 
 
 
 def _load_hebrew_tokenizer():
-    """Lade einen optionalen hebräischen Tokenizer.
-
-    Wir versuchen zuerst, das Paket ``hebrew_tokenizer`` zu importieren.
-    Falls es nicht installiert ist, wird ``None`` zurückgegeben.
-    """
     try:
         from hebrew_tokenizer import tokenize as ht_tokenize  # type: ignore
     except ImportError:
@@ -239,28 +243,18 @@ def _load_hebrew_tokenizer():
 
 
 def segment_text(text: str) -> List[str]:
-    """Segmentiere hebräischen Text in Wörter/Morpheme.
-
-    Diese Funktion nutzt, falls verfügbar, den ``hebrew_tokenizer`` zur
-    linguistischen Segmentierung. Der Rückgabewert ist eine Liste von
-    Tokens (Strings). Falls der Tokenizer nicht verfügbar ist, wird
-    einfach nach Leerzeichen gesplittet.
-    """
+    """Segmentiere hebräischen Text in Wörter/Morpheme."""
     if not text:
         return []
     tokenizer = _load_hebrew_tokenizer()
     if tokenizer is None:
         return text.split()
-    # Tokenizer kann entweder einen String oder eine Sequenz zurückgeben.
     try:
         tokens = tokenizer(text)
     except Exception:
-        # Fallback: Standard Splitting
         return text.split()
-    # ``hebrew_tokenizer`` liefert üblicherweise eine Liste von Wörtern
     if isinstance(tokens, str):
         return tokens.split()
-    # Wenn Tokenobjekte zurückgegeben werden (z.B. dicts mit 'text'), extrahieren
     try:
         return [tok["text"] if isinstance(tok, dict) and "text" in tok else str(tok) for tok in tokens]  # type: ignore
     except Exception:
@@ -268,18 +262,7 @@ def segment_text(text: str) -> List[str]:
 
 
 def _detect_context_flags(lines: List[str]) -> Tuple[List[bool], List[bool], List[bool], List[bool]]:
-    """Detektiere Kapitel‑/Alijah‑Grenzen basierend auf Zeilenumbrüchen.
-
-    Wir betrachten die Eingabe als Sequenz von Zeilen. Ein Kapitel‑ oder
-    Alijah‑Ende wird angenommen, wenn eine leere Zeile oder eine Zeile
-    mit nur Leerzeichen folgt. Der Beginn eines neuen Kapitels/Alijahs
-    wird dann beim nächsten Token gesetzt. Diese heuristische Erkennung
-    kann durch externe Metadaten ersetzt werden.
-
-    :param lines: Liste von Strings (Tokens), wie von ``segment_text``
-    :return: Vier Listen gleicher Länge: chapter_start, chapter_end,
-             aliyah_start, aliyah_end. Alle Werte sind bools.
-    """
+    """Detektiere Kapitel-/Alijah-Grenzen basierend auf Zeilenumbrüchen."""
     n = len(lines)
     chap_start = [False] * n
     chap_end = [False] * n
@@ -287,20 +270,16 @@ def _detect_context_flags(lines: List[str]) -> Tuple[List[bool], List[bool], Lis
     ali_end = [False] * n
     if n == 0:
         return chap_start, chap_end, ali_start, ali_end
-    # Wir interpretieren doppelte Leerzeichen ("" Einträge) als Abschnittsmarker
     prev_blank = True
     for i, tok in enumerate(lines):
         blank = not tok.strip()
         if prev_blank and not blank:
-            # Abschnitt beginnt
             chap_start[i] = True
             ali_start[i] = True
         if blank and not prev_blank:
-            # Abschnitt endet
             chap_end[i - 1] = True
             ali_end[i - 1] = True
         prev_blank = blank
-    # Letztes Token beenden, falls kein abschließender Blank folgt
     if not prev_blank:
         chap_end[-1] = True
         ali_end[-1] = True
@@ -308,29 +287,18 @@ def _detect_context_flags(lines: List[str]) -> Tuple[List[bool], List[bool], Lis
 
 
 def tokenize(text: str, attributes: Optional[List[str]] = None) -> List[TokenFull]:
-    """Zerlege hebräischen Text in TokenFull‑Objekte.
-
-    :param text: Der Eingabetext in Unicode.
-    :param attributes: Optionale Liste von Attributen, die jedem Token
-        zugeordnet werden (z.B. besondere Phrase‑Labels). Wird weniger
-        oder mehr als Tokens übergeben, werden Werte wiederholt oder
-        abgeschnitten.
-    :return: Liste von ``TokenFull`` mit Tropen‑Metadaten und Kontextflags.
-    """
+    """Zerlege hebräischen Text in TokenFull-Objekte."""
     tokens: List[TokenFull] = []
     if not text:
         return tokens
     normalised = normalise_hebrew(text)
     words = segment_text(normalised)
-    # Heuristische Kontextbestimmung anhand leerer Strings
     chap_start, chap_end, ali_start, ali_end = _detect_context_flags(words)
-    # Normiere Attribute list
     attr_list: List[str] = []
     if attributes:
         if len(attributes) >= len(words):
             attr_list = attributes[: len(words)]
         else:
-            # Wiederhole das letzte Attribut für restliche Tokens
             attr_list = attributes + [attributes[-1]] * (len(words) - len(attributes))
     else:
         attr_list = [""] * len(words)
@@ -359,7 +327,7 @@ def tokenize(text: str, attributes: Optional[List[str]] = None) -> List[TokenFul
 
 
 def _canonise_group_name(name: str) -> str:
-    """Kanonische Schreibweise wie in milestone9.py."""
+    """Kanonische Schreibweise."""
     canon = unicodedata.normalize("NFD", name)
     canon = ''.join(ch for ch in canon if not unicodedata.combining(ch))
     canon = canon.replace(' ', '_').replace('-', '_')
@@ -367,14 +335,8 @@ def _canonise_group_name(name: str) -> str:
 
 
 class ContextMatcher:
-    """Erweitertes Kontextmatching mit zusätzlichen Flags und Debug.
+    """Erweitertes Kontextmatching mit zusätzlichen Flags und Debug."""
 
-    Wie im MVP werden ``Style``‑Definitionen geladen und anhand
-    vorheriger/nächster Tropen die passende Notenfolge bestimmt. Neu
-    hinzugekommen ist die Berücksichtigung von Kapitel‑/Alijah‑Grenzen
-    sowie Attribut‑Labels in den XML‑Bedingungen. Außerdem erzeugt
-    ``match_context`` eine Debug‑Beschreibung.
-    """
     def __init__(self, xml_path: str | Path, style_name: Optional[str] = None) -> None:
         styles = load_trope_definitions(xml_path)
         if not styles:
@@ -383,7 +345,7 @@ class ContextMatcher:
         self.style_name = style_name or styles[0].name
         if self.style_name not in self.styles:
             raise ValueError(f"Stil '{self.style_name}' nicht in XML gefunden. Verfügbar: {list(self.styles)}")
-        self._cache: Dict[Tuple[str, Optional[str], Optional[str], bool, bool, bool, Tuple[str, ...]], Tuple[List[Note] | None, str]] = {}
+        self._cache: Dict[Tuple, Tuple] = {}
 
     def set_style(self, name: str) -> None:
         if name not in self.styles:
@@ -392,19 +354,8 @@ class ContextMatcher:
         self._cache.clear()
 
     def _match_context(self, trope_def: TropeDefinition, prev_name: Optional[str], next_name: Optional[str], flags: Dict[str, bool], attributes: Tuple[str, ...]) -> Tuple[List[Note] | None, str]:
-        """Durchsuche die Kontextdefinitionen und gebe Noten sowie Debug‑Info zurück.
-
-        :param trope_def: Definition des aktuellen Tropen.
-        :param prev_name: Kanonisierter Name der vorherigen Gruppe.
-        :param next_name: Kanonisierter Name der nächsten Gruppe.
-        :param flags: Dictionary mit Kontextflags: 'VERSE_END', 'CHAPTER_START', 'CHAPTER_END',
-                      'ALIYAH_START', 'ALIYAH_END'.
-        :param attributes: Tupel aller Attribute dieses Tokens.
-        :return: (Notenliste oder None, Debug‑String)
-        """
         default_notes: Optional[List[Note]] = None
         debug_default: str = ""
-        # Iterate through contexts in order of appearance
         for ctx in trope_def.contexts:
             if not ctx.conditions:
                 default_notes = ctx.notes
@@ -416,75 +367,47 @@ class ContextMatcher:
                 if key == 'AFTER':
                     debug_parts.append(f"AFTER={val}")
                     if next_name != val:
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'BEFORE':
                     debug_parts.append(f"BEFORE={val}")
                     if prev_name != val:
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'TROPE_GROUP':
                     debug_parts.append(f"TROPE_GROUP={val}")
                     if _canonise_group_name(trope_def.name) != val.upper():
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'END_OF_VERSE':
                     debug_parts.append("END_OF_VERSE")
                     if not flags.get('VERSE_END'):
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'END_OF_CHAPTER':
                     debug_parts.append("END_OF_CHAPTER")
                     if not flags.get('CHAPTER_END'):
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'START_OF_CHAPTER':
                     debug_parts.append("START_OF_CHAPTER")
                     if not flags.get('CHAPTER_START'):
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'END_OF_ALIYAH':
                     debug_parts.append("END_OF_ALIYAH")
                     if not flags.get('ALIYAH_END'):
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'START_OF_ALIYAH':
                     debug_parts.append("START_OF_ALIYAH")
                     if not flags.get('ALIYAH_START'):
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'ATTRIB':
                     debug_parts.append(f"ATTRIB={val}")
                     if val not in attributes:
-                        match = False
-                        debug_parts.append("≠")
-                        break
+                        match = False; break
                 elif key == 'DEFAULT':
-                    debug_default = f"Explizites DEFAULT"
+                    debug_default = "Explizites DEFAULT"
                     default_notes = ctx.notes
-                else:
-                    # Unbekannte Bedingungen ignorieren
-                    debug_parts.append(f"IGNORIERE {key}")
             if match:
-                debug_str = ", ".join(debug_parts) if debug_parts else "Kontext mit Bedingungen"
-                return ctx.notes, debug_str
+                return ctx.notes, ", ".join(debug_parts) if debug_parts else "Kontext mit Bedingungen"
         return default_notes, debug_default
 
     def get_notes_and_debug(self, token: TokenFull, prev_token: Optional[TokenFull], next_token: Optional[TokenFull]) -> Tuple[List[Note] | None, str]:
-        """Hole Noten und Debug‑Text für ein Token.
-
-        Kontextflags aus dem Token werden berücksichtigt. Der Cache‑Key
-        basiert auf Tropengruppe, vorheriger/nächster Gruppe, verse_end,
-        Kapitel‑ und Alijah‑Flags sowie den Attributen.
-        """
         prev_name = _canonise_group_name(prev_token.group_name) if prev_token else None
         next_name = _canonise_group_name(next_token.group_name) if next_token else None
         flags = {
@@ -522,7 +445,7 @@ class ContextMatcher:
         return notes, dbg
 
     def annotate_tokens(self, tokens: List[TokenFull]) -> List[TokenFull]:
-        """Annotiere Tokens mit Noten und Debug‑Text."""
+        """Annotiere Tokens mit Noten und Debug-Text."""
         annotated: List[TokenFull] = []
         for i, token in enumerate(tokens):
             prev_token = tokens[i - 1] if i > 0 else None
@@ -534,25 +457,81 @@ class ContextMatcher:
         return annotated
 
 
+def _find_tropedef_xml() -> Optional[Path]:
+    """Auto-locate tropedef.xml using find_data_file helper.
+
+    Returns the path if found, otherwise None.
+    """
+    try:
+        from taamimflow.utils.paths import find_data_file  # type: ignore
+        result = find_data_file('tropedef.xml')
+        if result:
+            return Path(result)
+    except Exception:
+        pass
+    # Fallback: search relative to this file
+    here = Path(__file__).parent
+    for candidate in [
+        here / 'tropedef.xml',
+        here.parent / 'tropedef.xml',
+        here.parent / 'data' / 'tropedef.xml',
+        Path('tropedef.xml'),
+        Path('taamimflow') / 'data' / 'tropedef.xml',
+    ]:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def extract_tokens_with_notes(
     text: str,
-    xml_path: str | Path,
+    xml_path: str | Path | None = None,
     style_name: Optional[str] = None,
+    *,
+    style: Optional[str] = None,  # alias for style_name for convenience
     attributes: Optional[List[str]] = None,
 ) -> List[TokenFull]:
-    """End‑to‑End‑Funktion für Milestone 9.1.
+    """End-to-End-Funktion für Milestone 9.1.
 
-    Diese Funktion kombiniert Tokenisierung, Kontextmatching und Debug‑Ausgabe.
+    Diese Funktion kombiniert Tokenisierung, Kontextmatching und Debug-Ausgabe.
 
-    :param text: Hebräischer Text mit Cantillation‑Marken.
-    :param xml_path: Pfad zur tropedef.xml
-    :param style_name: Optional: Name des Stils (Tradition)
+    FIX V10: ``xml_path`` ist nun optional. Wenn nicht angegeben, wird
+    ``tropedef.xml`` automatisch über ``find_data_file`` gesucht. Falls
+    die Datei nicht gefunden wird, werden Tokens **ohne Noten** zurückgegeben
+    (graceful degradation statt Exception).
+
+    ``style`` ist ein Alias für ``style_name`` – beide Schreibweisen werden
+    akzeptiert, um Aufrufe wie ``extract_tokens_with_notes(text, style='Sephardi')``
+    zu ermöglichen.
+
+    :param text: Hebräischer Text mit Cantillation-Marken.
+    :param xml_path: Pfad zur tropedef.xml (optional – wird auto-lokalisiert).
+    :param style_name: Name des Stils / der Tradition (z.B. "Sephardi").
+    :param style: Alias für style_name.
     :param attributes: Optional: Liste von Attributen pro Token.
     :return: Liste mit annotierten ``TokenFull``
     """
+    # Resolve style alias
+    effective_style = style_name or style
+
+    # Tokenize first – this always works, even without XML
     tokens = tokenize(text, attributes)
-    matcher = ContextMatcher(xml_path, style_name)
-    return matcher.annotate_tokens(tokens)
+
+    # Resolve xml_path
+    if xml_path is None:
+        xml_path = _find_tropedef_xml()
+
+    if xml_path is None:
+        # No tropedef.xml found – return tokens without notes
+        return tokens
+
+    # Try context matching with XML
+    try:
+        matcher = ContextMatcher(xml_path, effective_style)
+        return matcher.annotate_tokens(tokens)
+    except Exception:
+        # Graceful fallback: return tokens without notes
+        return tokens
 
 
 __all__ = [
